@@ -1303,3 +1303,20 @@ core 8, the test programs a few seconds, the gate's tests 20, the package
 half a minute, the frontend tests 3. A runner's four slower cores, with
 Chimera, Qt, miniBox and the libraries to build or fetch on a cold cache,
 should take about one and a half to two hours; the job's limit is five.
+
+**On GitHub** (2026-11-04): the first CI run stopped building the native
+reference, as the runner had no libxrender-dev (Cemu's platform.h
+includes X11/extensions/Xrender.h; the replay here had skipped the
+installs). With it added (9808cfa), the run passed and published
+"Development build 9808cfa8 (made 2026-11-04 15:53 CET)".
+
+**The published package on Windows** (2026-11-04; the GTX 1060 computer,
+Chimera's published build fa499b9c, its window, not the headless runner):
+a project of New Super Mario Bros. U's NUS zip with its add-on content,
+the common key and the console's Mii resource as firmware, default
+settings, and a movie pressing A at the title screen (frames 1899 to
+1902), opened with TAStudio and played to frame 2000. Cemu drew on the
+card ("4.6.0 NVIDIA 581.42"), both screens showed the SpotPass notice that
+follows the title screen, and TAStudio showed the presses. The window
+played it at about 7 frames a second, keeping a state of every frame.
+Not compared with Linux, frame by frame, in this run.

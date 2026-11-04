@@ -44,9 +44,11 @@ run on this repository's own Wii U test programs.
 One game has been tried, New Super Mario Bros. U: played from boot through
 the opening scene and the world map into its first level, on Linux with
 software OpenGL (Mesa's llvmpipe), and its history over that level sought
-into on Windows on an NVIDIA GTX 1060. No other game, no other level of it,
-no AMD or Intel card and no macOS have been tried, and the window has not
-been tried on Windows. [docs/PLAN.md](docs/PLAN.md) says what was measured.
+into on Windows on an NVIDIA GTX 1060. On that computer the published
+core also played it in Chimera's window, with TAStudio open, to the notice
+after its title screen. No other game, no other level of it, no AMD or
+Intel card and no macOS have been tried. [docs/PLAN.md](docs/PLAN.md) says
+what was measured.
 
 ## Building and testing
 
