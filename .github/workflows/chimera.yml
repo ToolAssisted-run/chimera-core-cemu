@@ -76,7 +76,7 @@ jobs:
         # draw on here
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 curl xz-utils libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
+          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 curl xz-utils libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libxrender-dev libasound2-dev gcc-14 g++-14
 
       - name: Use GCC 14
         # the core is built and tested with GCC 14, and miniBox builds the
