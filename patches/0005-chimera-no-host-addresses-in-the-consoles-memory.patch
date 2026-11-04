@@ -1,0 +1,47 @@
+diff --git a/src/Cafe/IOSU/legacy/iosu_ioctl.h b/src/Cafe/IOSU/legacy/iosu_ioctl.h
+index c1fcaee..958c387 100644
+--- a/src/Cafe/IOSU/legacy/iosu_ioctl.h
++++ b/src/Cafe/IOSU/legacy/iosu_ioctl.h
+@@ -22,7 +22,12 @@ typedef struct
+ 	uint32 countOut;
+ 	MEMPTR<ioBufferVector_t> bufferVectors;
+ 	// info about submitter
++#if defined(CHIMERA)
++	// chimera: kept as the console's address, not the host's (this lives in the console's memory)
++	MEMPTR<OSThread_t> ppcThread;
++#else
+ 	OSThread_t* ppcThread;
++#endif
+ 	//MPTR ppcThread;
+ 	// result
+ 	bool isCompleted;
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp b/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
+index 35613c2..b41fd69 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
+@@ -2024,7 +2024,13 @@ namespace coreinit
+ 		return FSA_RESULT::OK;
+ 	}
+ 
++#if defined(CHIMERA)
++	// chimera: kept as the console's address, not the host's (this lives in the console's memory)
++	CafeStaticVar<MEMPTR<coreinit::IPCBufPool_t>> s_fsaIpcPoolPtr{coreinit::g_coreinitStaticData};
++	#define s_fsaIpcPool (s_fsaIpcPoolPtr->GetPtr())
++#else
+ 	CafeStaticVar<coreinit::IPCBufPool_t*> s_fsaIpcPool{coreinit::g_coreinitStaticData};
++#endif
+ 	CafeStaticVar<uint8, 0x37500> s_fsaIpcPoolBuffer{coreinit::g_coreinitStaticData};
+ 	CafeStaticVar<uint32be> s_fsaIpcPoolBufferNumItems{coreinit::g_coreinitStaticData};
+ 
+@@ -2035,7 +2041,11 @@ namespace coreinit
+ 	{
+ 		if (!s_fsaInitDone)
+ 		{
++#if defined(CHIMERA)
++			*s_fsaIpcPoolPtr = IPCBufPoolCreate(s_fsaIpcPoolBuffer.GetPtr(), s_fsaIpcPoolBuffer.GetByteSize(), sizeof(iosu::fsa::FSAShimBuffer), &s_fsaIpcPoolBufferNumItems, 0);
++#else
+ 			s_fsaIpcPool = IPCBufPoolCreate(s_fsaIpcPoolBuffer.GetPtr(), s_fsaIpcPoolBuffer.GetByteSize(), sizeof(iosu::fsa::FSAShimBuffer), &s_fsaIpcPoolBufferNumItems, 0);
++#endif
+ 			s_fsaInitDone = true;
+ 		}
+ 	}

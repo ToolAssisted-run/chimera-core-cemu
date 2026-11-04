@@ -1,0 +1,14 @@
+diff --git a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp b/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
+index 9c8bd67..13f8803 100644
+--- a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
+@@ -995,7 +995,9 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
+ 		return;
+ 	swkbd_render(!isPadView);
+ 	nn::erreula::render(!isPadView);
++#if !defined(CHIMERA) // chimera: the picture is the console's; Cemu's own notices and counters are not drawn into it
+ 	LatteOverlay_render(isPadView);
++#endif
+ 	g_renderer->ImguiEnd();
+ }
+ 

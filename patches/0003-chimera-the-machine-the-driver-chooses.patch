@@ -1,0 +1,44 @@
+diff --git a/src/Cafe/GraphicPack/GraphicPack2.cpp b/src/Cafe/GraphicPack/GraphicPack2.cpp
+index 850fb6b..6864fd9 100644
+--- a/src/Cafe/GraphicPack/GraphicPack2.cpp
++++ b/src/Cafe/GraphicPack/GraphicPack2.cpp
+@@ -246,6 +246,9 @@ void GraphicPack2::ClearGraphicPacks()
+ 
+ void GraphicPack2::WaitUntilReady()
+ {
++#if defined(CHIMERA)
++	return; // chimera: no graphic packs are loaded (they change the game)
++#endif
+ 	while (!s_isReady)
+ 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+ }
+diff --git a/src/config/ActiveSettings.cpp b/src/config/ActiveSettings.cpp
+index 08def5a..a1536ab 100644
+--- a/src/config/ActiveSettings.cpp
++++ b/src/config/ActiveSettings.cpp
+@@ -64,8 +64,15 @@ bool ActiveSettings::DisplayDRCEnabled()
+ 	return g_current_game_profile->StartWithGamepadView();
+ }
+ 
++#if defined(CHIMERA)
++CPUMode chimera_cpu_mode(); // chimera: the driver's, the same on every host
++#endif
++
+ CPUMode ActiveSettings::GetCPUMode()
+ {
++#if defined(CHIMERA)
++	return chimera_cpu_mode();
++#endif
+ 	auto mode = g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
+ 
+ 	if (mode == CPUMode::Auto)
+@@ -93,6 +100,9 @@ void ActiveSettings::SetTimerShiftFactor(uint8 shiftFactor)
+ 
+ PrecompiledShaderOption ActiveSettings::GetPrecompiledShadersOption()
+ {
++#if defined(CHIMERA)
++	return PrecompiledShaderOption::Disable; // chimera: no driver's binaries kept (LatteShaderCache_Load)
++#endif
+ 	return PrecompiledShaderOption::Auto; // g_current_game_profile->GetPrecompiledShadersState().value_or(GetConfig().precompiled_shaders);
+ }
+ 

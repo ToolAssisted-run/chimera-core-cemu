@@ -1,0 +1,228 @@
+name: chimera waterbox core
+
+# The core as Chimera ships it: a sandboxed core.wbx package.
+#
+# No Wii U game, system file or key is ours to put on a public runner, so
+# the gate here runs on this repository's own Wii U test programs
+# (tests/homebrew, built fresh with devkitPPC and wut), as programs (.rpx)
+# and packed as titles (.wua, .wuhb), with Cemu's free stand-in font. It
+# builds the native reference and the sandboxed core from the pinned Cemu
+# with the patch series applied (Nintendo's keys taken out), compares them
+# frame by frame and through states, on Mesa's software OpenGL (llvmpipe),
+# builds the package, plays it through chimera-run and Chimera's window run
+# headless, and puts it through Chimera's own contract tests.
+#
+# What a runner cannot run says SKIP, and runs where the files are before
+# anything is pushed (docs/BUILDING.md names the variables):
+# - firmware:fonts and engine:fonts: the console's fonts (Cemu's copies, the
+#   console's own);
+# - firmware:mii and engine:mii: the console's Mii resource;
+# - nus:game and engine:nus: a game in the NUS form and the Wii U common key;
+# - run-windows.sh: Windows and a graphics card, and is not run here.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'dev (rolling) or nightly (dated). Blank means dev.'
+        required: false
+        default: ''
+        type: string
+  schedule:
+    # 04:00 UTC. A nightly is published only when main moved since the last one;
+    # the reusable workflow checks, so an unchanged core costs one idle run.
+    - cron: '0 4 * * *'
+
+# Keyed by the EVENT as well as the ref: the nightly schedule and a push to
+# main would otherwise cancel each other, and the publish that depends on the
+# cancelled gate is then skipped with nothing reporting a failure.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CHIMERA_REF: main
+
+jobs:
+
+  gate:
+    name: gate (native against sandbox, states, the package, chimera-run and the window, Chimera contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out Cemu and the parts of it the build uses
+        # not the rest of Cemu's submodules (vcpkg among them), which the
+        # build does not use
+        run: |
+          git submodule update --init --depth 1 extern/cemu
+          git -C extern/cemu submodule update --init --depth 1 dependencies/ZArchive dependencies/imgui dependencies/Vulkan-Headers
+
+      - name: Check out Chimera
+        uses: actions/checkout@v6
+        with:
+          repository: ToolAssisted-run/chimera
+          ref: ${{ env.CHIMERA_REF }}
+          path: chimera-checkout
+          submodules: recursive
+
+      - name: Install build dependencies
+        # Mesa's EGL and llvmpipe are the GPU both runners and the window
+        # draw on here
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 curl xz-utils libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
+
+      - name: Use GCC 14
+        # the core is built and tested with GCC 14, and miniBox builds the
+        # guest's libstdc++ for whatever gcc is on PATH: everything gets GCC
+        # 14 first on PATH
+        run: |
+          mkdir -p "$HOME/gcc14"
+          for t in gcc:gcc-14 g++:g++-14 cc:gcc-14 c++:g++-14 cpp:cpp-14; do
+            ln -sf "/usr/bin/${t#*:}" "$HOME/gcc14/${t%%:*}"
+          done
+          echo "$HOME/gcc14" >> "$GITHUB_PATH"
+          "$HOME/gcc14/gcc" -dumpfullversion
+
+      - name: Cache Qt
+        uses: actions/cache@v4
+        with:
+          path: ~/qt
+          key: qt-6.12.0-linux-aqt-3.3.0
+
+      - name: Build Chimera (the engine, chimera-run and the window)
+        run: chimera-checkout/tools/ci-chimera.sh "$HOME/qt"
+
+      - name: Cache the guest toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            chimera-checkout/extern/chimera-common-minibox/build/meson-linux
+            chimera-checkout/extern/chimera-common-minibox/build/meson-cpp
+          key: guest-cpp-gcc14-${{ runner.os }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/meson.build') }}
+
+      - name: Build miniBox (host + C++ guest toolchain)
+        run: |
+          mb="$PWD/chimera-checkout/extern/chimera-common-minibox"
+          [ -f "$mb/build/meson-linux/build.ninja" ] || meson setup "$mb/build/meson-linux" "$mb"
+          meson compile -C "$mb/build/meson-linux"
+          [ -f "$mb/build/meson-cpp/build.ninja" ] || meson setup "$mb/build/meson-cpp" "$mb" -Dguest_cpp=true
+          meson compile -C "$mb/build/meson-cpp"
+
+      - name: Cache the libraries and devkitPPC
+        # zlib, zstd, fmt, pugixml, glm, rapidjson, Boost, OpenSSL and curl's
+        # headers for both flavours, and the devkitPPC layer the test programs
+        # are built with: each pinned by SHA-256 in the script that fetches it,
+        # so the scripts key the cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/dl
+          key: deps-gcc14-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/fetch-devkitpro.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}
+
+      - name: Build the native reference
+        env:
+          MINIBOX_DIR: ${{ github.workspace }}/chimera-checkout/extern/chimera-common-minibox
+        run: ./waterbox/build-native.sh -j 4
+
+      - name: Build the sandboxed core
+        env:
+          MINIBOX_DIR: ${{ github.workspace }}/chimera-checkout/extern/chimera-common-minibox
+        run: ./waterbox/build-guest.sh -j 4
+
+      - name: Build the test programs
+        run: |
+          ./waterbox/fetch-devkitpro.sh
+          ./waterbox/build-homebrew.sh
+          ./waterbox/build-test-titles.sh
+
+      - name: Core tests
+        # and every test a runner can run must have passed, so one that
+        # stopped running cannot go unnoticed
+        env:
+          CHIMERA_ROOT: ${{ github.workspace }}/chimera-checkout
+        run: |
+          set +e
+          ./waterbox/run-gate.sh > gate.out 2>&1
+          rc=$?
+          set -e
+          grep -v '^miniBox:' gate.out
+          [ "$rc" -eq 0 ]
+          for t in clock:repeats clock:stall clock:recompiler sandbox:native sandbox:recompiler input:gamepad input:screens \
+                   sound:tv lag:counted input:sandbox fonts:standin formats:titles gx2:draw gx2:queries gx2:remade gx2:sandbox \
+                   gx2:readback cpu:cores savedata:round profiles:shipped storage:defaults nus:refused keys:absent host:random \
+                   picture:remade states:rerecord states:input states:session texts:names texts:chimera; do
+            grep -Eq "^$t +PASS" gate.out || { echo "$t did not pass"; exit 1; }
+          done
+
+      - name: Build and install the package
+        # The commit is the core's authoritative version: this build is the one
+        # that publishes the artifact, so what it stamps is what a movie can
+        # cite. A package built by hand stamps "+local" instead.
+        env:
+          CORE_VERSION: ${{ github.sha }}
+          MINIBOX_DIR: ${{ github.workspace }}/chimera-checkout/extern/chimera-common-minibox
+        run: ./waterbox/build-package.sh -r chimera-checkout -j 4
+
+      - name: Frontend tests
+        # the package through chimera-run and Chimera's window run headless
+        run: |
+          set +e
+          CEMU_QT_LIB="$HOME/qt/6.12.0/gcc_64/lib" ./waterbox/run-frontend.sh --chimera-root chimera-checkout > frontend.out 2>&1
+          rc=$?
+          set -e
+          grep -v '^miniBox:' frontend.out
+          [ "$rc" -eq 0 ]
+          for t in engine:program window:program engine:input engine:states engine:readback engine:history engine:standin \
+                   engine:archive engine:savedata; do
+            grep -Eq "^$t +PASS" frontend.out || { echo "$t did not pass"; exit 1; }
+          done
+
+      - name: The package through the real frontend
+        # Chimera's own contract tests, run against THIS package: readable,
+        # built for an ABI this frontend runs, a working factory, binding only
+        # buttons its controller declares, stamping a version.
+        env:
+          CHIMERA_CORES_DIR: ${{ github.workspace }}/chimera-checkout/build/Cores
+        run: chimera-checkout/build/meson-linux/source/ui/test-packages
+
+      - name: Publish the core package
+        uses: actions/upload-artifact@v7
+        with:
+          name: cemu-${{ github.sha }}
+          path: chimera-checkout/build/Cores/cemu.chimeraCore
+          if-no-files-found: error
+
+      - name: Upload the test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-output
+          path: |
+            gate.out
+            frontend.out
+            build/*.log
+
+  publish:
+    # What the gate passed, published as this core's own release: a rolling
+    # `dev` on every green push to main, an immutable `nightly-YYYY-MM-DD` from
+    # the scheduled run. The logic is Chimera's tools/publish-core.sh, through
+    # the one reusable workflow every core publishes with.
+    name: publish
+    needs: [ gate ]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    uses: ToolAssisted-run/chimera/.github/workflows/publish-core.yml@main
+    with:
+      core-id: cemu
+      artifact: cemu-${{ github.sha }}
+      package: cemu.chimeraCore
+      kind: ${{ github.event.inputs.kind }}

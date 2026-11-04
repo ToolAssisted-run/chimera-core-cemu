@@ -1,0 +1,168 @@
+diff --git a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp
+index 2fafda3..811c503 100644
+--- a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp
++++ b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp
+@@ -23,6 +23,17 @@ class DefaultOpenGLCanvasCallbacks : public OpenGLCanvasCallbacks
+ {
+ } g_defaultOpenGLCanvasCallbacks;
+ 
++#if defined(CHIMERA)
++static GLuint s_chimeraVertexArray = 0;
++
++void OpenGLRenderer_chimeraForgetVertexArray()
++{
++	if (s_chimeraVertexArray)
++		glDeleteVertexArrays(1, &s_chimeraVertexArray);
++	s_chimeraVertexArray = 0;
++}
++#endif
++
+ OpenGLCanvasCallbacks* g_openGLCanvasCallbacks = &g_defaultOpenGLCanvasCallbacks;
+ 
+ void SetOpenGLCanvasCallbacks(OpenGLCanvasCallbacks* callbacks)
+@@ -203,8 +214,13 @@ ImTextureID OpenGLRenderer::GenerateTexture(const std::vector<uint8>& data, cons
+ 
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++#if defined(CHIMERA)
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); // chimera: no GL_CLAMP in a core profile
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++#else
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
++#endif
+ 
+ 	glActiveTexture(GL_TEXTURE0);
+ 	glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB, size.x, size.y, 0, GL_RGB, GL_UNSIGNED_BYTE, data.data());
+@@ -227,7 +243,20 @@ void OpenGLRenderer::DeleteFontTextures()
+ 
+ typedef void(*GL_IMPORT)();
+ 
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++// chimera: the driver finds the entry points (EGL natively, the GPU bridge
++// in the sandbox)
++void* chimera_gl_proc_address(const char* name);
++
++void LoadOpenGLImports()
++{
++#define GLFUNC(__type, __name)	__name = (__type)chimera_gl_proc_address(STRINGIFY(__name));
++#define EGLFUNC(__type, __name)
++#include "Common/GLInclude/glFunctions.h"
++#undef GLFUNC
++#undef EGLFUNC
++}
++#elif BOOST_OS_WINDOWS
+ GL_IMPORT _GetOpenGLFunction(HMODULE hLib, const char* name)
+ {
+ 	GL_IMPORT r = (GL_IMPORT)wglGetProcAddress(name);
+@@ -393,6 +422,13 @@ void OpenGLRenderer::Initialize()
+ 		glBindFramebuffer(GL_FRAMEBUFFER_EXT, 0);
+ 	}
+ 
++#if defined(CHIMERA)
++	// chimera: a core profile context (the GPU bridge's) has no vertex array
++	// object of its own; Cemu draws as if one were bound, so one is, for good
++	glGenVertexArrays(1, &s_chimeraVertexArray);
++	glBindVertexArray(s_chimeraVertexArray);
++#endif
++
+ 	// create uniform buffers for backbufferblit
+ 	glCreateBuffers(1, &m_backbufferBlit_uniformBuffer);
+ 	glNamedBufferStorage(m_backbufferBlit_uniformBuffer, sizeof(RendererOutputShader::OutputUniformVariables), nullptr, GL_DYNAMIC_STORAGE_BIT);
+@@ -654,8 +690,12 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
+ 
+ 	glDisable(GL_FRAMEBUFFER_SRGB);
+ 
++#if defined(CHIMERA)
++	glDrawArrays(GL_TRIANGLES, 0, 6); // chimera: a core profile draws no indices from the host's memory
++#else
+ 	uint16 indexData[6] = { 0,1,2,3,4,5 };
+ 	glDrawRangeElements(GL_TRIANGLES, 0, 5, 6, GL_UNSIGNED_SHORT, indexData);
++#endif
+ 
+ 	glEnable(GL_FRAMEBUFFER_SRGB);
+ 
+@@ -751,7 +791,11 @@ void OpenGLRenderer::rendertarget_bindFramebufferObject(LatteCachedFBO* cfbo)
+ 		fboid = cfboGL->glId_fbo;
+ 	}
+ 	else
++#if defined(CHIMERA)
++		fboid = g_openGLCanvasCallbacks->BackbufferFramebuffer();
++#else
+ 		fboid = 0;
++#endif
+ 
+ 	if (prevBoundFBO != fboid)
+ 	{
+@@ -1859,7 +1903,9 @@ void OpenGLRenderer::renderstate_resetColorControl()
+ 	// disable alpha test
+ 	if (prevAlphaTestEnable != 0)
+ 	{
++#if !defined(CHIMERA) // chimera: no fixed-function alpha test in a core profile
+ 		glDisable(GL_ALPHA_TEST);
++#endif
+ 		prevAlphaTestEnable = 0;
+ 	}
+ 	if (prevLogicOp != GL_COPY)
+diff --git a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h
+index a0d3305..6990453 100644
+--- a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h
++++ b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h
+@@ -18,6 +18,14 @@ class OpenGLCanvasCallbacks
+ 		return false;
+ 	}
+ 	virtual void SwapBuffers(bool swapTV, bool swapDRC) {}
++#if defined(CHIMERA)
++	// chimera: the framebuffer that stands for the window's (0 is the
++	// window's own), for a canvas that draws into an object of its own
++	virtual uint32 BackbufferFramebuffer() const
++	{
++		return 0;
++	}
++#endif
+ 	virtual ~OpenGLCanvasCallbacks() = default;
+ };
+ 
+diff --git a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLSurfaceCopy.cpp b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLSurfaceCopy.cpp
+index de1e122..7fe79af 100644
+--- a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLSurfaceCopy.cpp
++++ b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLSurfaceCopy.cpp
+@@ -108,8 +108,14 @@ void OpenGLRenderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture* s
+ 	catchOpenGLError();
+ 
+ 	// draw
++#if defined(CHIMERA)
++	// chimera: a core profile draws no indices from the host's memory; the
++	// four corners as a strip cover the same rectangle
++	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++#else
+ 	uint16 indexData[6] = { 0,1,3,0,2,3 };
+ 	glDrawRangeElements(GL_TRIANGLES, 0, 5, 6, GL_UNSIGNED_SHORT, indexData);
++#endif
+ 	catchOpenGLError();
+ 
+ 	LatteGPUState.repeatTextureInitialization = true;
+@@ -119,6 +125,22 @@ void OpenGLRenderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture* s
+ LatteGLDefaultShader_t* _copyShader_depthToColor;
+ LatteGLDefaultShader_t* _copyShader_colorToDepth;
+ 
++#if defined(CHIMERA)
++// chimera: the copy shaders' programs belong to the GPU context they were
++// made in; on a new one they are made again when next asked for
++void OpenGLSurfaceCopy_chimeraForgetContext()
++{
++	for (LatteGLDefaultShader_t** shader : {&_copyShader_depthToColor, &_copyShader_colorToDepth})
++	{
++		if (!*shader)
++			continue;
++		glDeleteProgram((*shader)->glProgamId);
++		free(*shader);
++		*shader = nullptr;
++	}
++}
++#endif
++
+ void LatteGLDefaultShader_pixelCopyShader_generateVSBody(StringBuf* vs)
+ {
+ 	vs->add("#version 420\r\n");

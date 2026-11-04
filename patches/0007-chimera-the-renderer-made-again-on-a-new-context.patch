@@ -1,0 +1,222 @@
+diff --git a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp
+index 78659de..af4c9c4 100644
+--- a/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp
++++ b/src/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp
+@@ -291,6 +291,84 @@ void _removeFromBucket(indexDataCacheEntry2_t* entry)
+ 	}
+ }
+ 
++#if defined(CHIMERA)
++// chimera: a core profile has no GL_QUADS and no GL_QUAD_STRIP (the GPU
++// bridge's context is one). Those draws are drawn as triangles, two a quad:
++// an index list in the cache holds the triangles' indices, a draw without
++// one is given a list of its own (s_chimeraAutoQuads), and the count drawn
++// is the triangles'.
++static uint32 s_chimeraTriangleIndexCount = 0; // this draw's, when it is quads
++static GLuint s_chimeraAutoQuads[2] = {0, 0};  // QUADS, QUAD_STRIP
++static uint32 s_chimeraAutoQuadsVertices[2] = {0, 0}; // the vertices each list covers
++
++static bool ChimeraIsQuads(uint32 primitiveMode)
++{
++	return primitiveMode == (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS ||
++		primitiveMode == (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUAD_STRIP;
++}
++
++static uint32 ChimeraTriangleIndexCount(uint32 primitiveMode, uint32 count)
++{
++	if (primitiveMode == (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS)
++		return count / 4 * 6;
++	return count >= 4 ? (count - 2) / 2 * 6 : 0;
++}
++
++// a quad's v0 v1 v2 v3 are the triangles v0 v1 v2 and v0 v2 v3; a quad
++// strip's quads are v0 v1 v3 v2, v2 v3 v5 v4, ...
++template<typename T>
++static void ChimeraQuadsToTriangles(uint32 primitiveMode, const T* in, uint32 count, T* out)
++{
++	if (primitiveMode == (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS)
++	{
++		for (uint32 q = 0; q + 4 <= count; q += 4)
++		{
++			*out++ = in[q]; *out++ = in[q + 1]; *out++ = in[q + 2];
++			*out++ = in[q]; *out++ = in[q + 2]; *out++ = in[q + 3];
++		}
++		return;
++	}
++	for (uint32 i = 0; i + 4 <= count; i += 2)
++	{
++		*out++ = in[i]; *out++ = in[i + 1]; *out++ = in[i + 3];
++		*out++ = in[i]; *out++ = in[i + 3]; *out++ = in[i + 2];
++	}
++}
++
++// the decoded indices of a quads draw, as triangles, into the cache entry
++template<typename T>
++static uint32 ChimeraUploadTriangles(uint32 primitiveMode, uint32 count, uint32 offset)
++{
++	const uint32 triangles = ChimeraTriangleIndexCount(primitiveMode, count);
++	std::vector<T> out(triangles);
++	ChimeraQuadsToTriangles<T>(primitiveMode, (const T*)indexState.tempIndexStorage, count, out.data());
++	glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, offset, triangles * sizeof(T), out.data());
++	return triangles;
++}
++
++// The index list of a quads draw without one: the vertices 0..n-1 as
++// triangles, made larger when a draw needs more.
++static GLuint ChimeraAutoQuads(uint32 primitiveMode, uint32 vertices)
++{
++	const int k = primitiveMode == (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS ? 0 : 1;
++	if (s_chimeraAutoQuads[k] == 0 || s_chimeraAutoQuadsVertices[k] < vertices)
++	{
++		uint32 n = std::max<uint32>(vertices, 4096);
++		std::vector<uint32> sequence(n);
++		for (uint32 i = 0; i < n; i++)
++			sequence[i] = i;
++		std::vector<uint32> triangles(ChimeraTriangleIndexCount(primitiveMode, n));
++		ChimeraQuadsToTriangles<uint32>(primitiveMode, sequence.data(), n, triangles.data());
++		if (s_chimeraAutoQuads[k] == 0)
++			glGenBuffers(1, &s_chimeraAutoQuads[k]);
++		OpenGLRenderer::SetArrayElementBuffer(s_chimeraAutoQuads[k]);
++		glBufferData(GL_ELEMENT_ARRAY_BUFFER, triangles.size() * sizeof(uint32), triangles.data(), GL_STATIC_DRAW);
++		s_chimeraAutoQuadsVertices[k] = n;
++	}
++	return s_chimeraAutoQuads[k];
++}
++#endif
++
+ void _decodeAndUploadIndexData(indexDataCacheEntry2_t* cacheEntry)
+ {
+ 	uint32 count = cacheEntry->key.count;
+@@ -335,6 +413,11 @@ void _decodeAndUploadIndexData(indexDataCacheEntry2_t* cacheEntry)
+ 		}
+ 		cacheEntry->minIndex = indexMinU16;
+ 		cacheEntry->maxIndex = indexMaxU16;
++#if defined(CHIMERA)
++		if (ChimeraIsQuads(cacheEntry->key.primitiveMode))
++			ChimeraUploadTriangles<uint16>(cacheEntry->key.primitiveMode, count, cacheEntry->heapEntry->startOffset);
++		else
++#endif
+ 		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cacheEntry->heapEntry->startOffset, count * sizeof(uint16), indexState.tempIndexStorage);
+ 		performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += (count * sizeof(uint16));
+ 	}
+@@ -360,6 +443,11 @@ void _decodeAndUploadIndexData(indexDataCacheEntry2_t* cacheEntry)
+ 		}
+ 		cacheEntry->minIndex = indexMinU32;
+ 		cacheEntry->maxIndex = indexMaxU32;
++#if defined(CHIMERA)
++		if (ChimeraIsQuads(cacheEntry->key.primitiveMode))
++			ChimeraUploadTriangles<uint32>(cacheEntry->key.primitiveMode, count, cacheEntry->heapEntry->startOffset);
++		else
++#endif
+ 		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cacheEntry->heapEntry->startOffset, count * sizeof(uint32), indexState.tempIndexStorage);
+ 		performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += (count * sizeof(uint32));
+ 	}
+@@ -435,6 +523,9 @@ uint32 LatteDrawGL_calculateIndexDataHash(uint8* data, uint32 size)
+ // todo - Outdated cache implementation. Update OpenGL renderer to use the generic implementation that is also used by the Vulkan renderer
+ void LatteDrawGL_prepareIndicesWithGPUCache(MPTR indexDataMPTR, _INDEX_TYPE indexType, sint32 count, sint32 primitiveMode)
+ {
++#if defined(CHIMERA)
++	s_chimeraTriangleIndexCount = ChimeraIsQuads((uint32)primitiveMode) ? ChimeraTriangleIndexCount((uint32)primitiveMode, (uint32)count) : 0;
++#endif
+ 	if (indexType == _INDEX_TYPE::AUTO)
+ 	{
+ 		indexState.minIndex = 0;
+@@ -485,6 +576,10 @@ void LatteDrawGL_prepareIndicesWithGPUCache(MPTR indexDataMPTR, _INDEX_TYPE inde
+ 		cacheIndexDataSize = count * sizeof(uint16);
+ 	else
+ 		cacheIndexDataSize = count * sizeof(uint32);
++#if defined(CHIMERA)
++	if (ChimeraIsQuads((uint32)primitiveMode)) // the triangles' indices are what is kept
++		cacheIndexDataSize = std::max<sint32>(cacheIndexDataSize, s_chimeraTriangleIndexCount * ((indexType == _INDEX_TYPE::U16_BE || indexType == _INDEX_TYPE::U16_LE) ? sizeof(uint16) : sizeof(uint32)));
++#endif
+ 	// no matching entry, create new one
+ 	VirtualBufferHeapEntry_t* heapEntry = virtualBufferHeap_allocate(indexState.indexBufferVirtualHeap, cacheIndexDataSize);
+ 	if (heapEntry == nullptr)
+@@ -529,6 +624,26 @@ void LatteDrawGL_prepareIndicesWithGPUCache(MPTR indexDataMPTR, _INDEX_TYPE inde
+ 
+ void LatteDrawGL_doDraw(_INDEX_TYPE indexType, uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count)
+ {
++#if defined(CHIMERA)
++	// quads (and not the points a stream-out draw of quads becomes): as
++	// triangles. The mode is set again by the next draw.
++	if (s_chimeraTriangleIndexCount != 0 && (sGLActiveDrawMode == GL_QUADS || sGLActiveDrawMode == GL_QUAD_STRIP))
++	{
++		const uint32 primitiveMode = sGLActiveDrawMode == GL_QUADS ? (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS
++			: (uint32)Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUAD_STRIP;
++		sGLActiveDrawMode = GL_TRIANGLES;
++		if (indexType == _INDEX_TYPE::AUTO)
++		{
++			OpenGLRenderer::SetArrayElementBuffer(ChimeraAutoQuads(primitiveMode, count));
++			if (instanceCount > 1 || baseInstance != 0)
++				glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES, s_chimeraTriangleIndexCount, GL_UNSIGNED_INT, nullptr, instanceCount, baseVertex, baseInstance);
++			else
++				glDrawElementsBaseVertex(GL_TRIANGLES, s_chimeraTriangleIndexCount, GL_UNSIGNED_INT, nullptr, baseVertex);
++			return;
++		}
++		count = s_chimeraTriangleIndexCount;
++	}
++#endif
+ 	if (indexType == _INDEX_TYPE::U16_BE)
+ 	{
+ 		// 16bit index, big endian
+@@ -1165,8 +1280,60 @@ void OpenGLRenderer::draw_endSequence()
+ 
+ #define GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR		(18*1024*1024) // 18MB
+ 
++#if defined(CHIMERA)
++void OpenGLSurfaceCopy_chimeraForgetContext();
++void OpenGLRenderer_chimeraForgetVertexArray();
++static bool s_chimeraIndexBufferGone = false;
++
++// chimera: what this file keeps of a GPU context is let go of when the
++// context moves (LatteThread_chimeraRemakeRenderer): the index lists cached
++// in the old context's buffer, the buffer itself (made again by draw_init),
++// what it remembers of the vertex array's state, the rectangle shaders and
++// the copy shaders.
++void OpenGLRenderer_chimeraForgetContext()
++{
++	LatteDrawGL_removeLeastRecentlyUsedIndexCacheEntries(0x7FFFFFFF);
++	if (indexState.initialized)
++	{
++		glDeleteBuffers(1, &indexState.glIndexCacheBuffer);
++		indexState.glIndexCacheBuffer = 0;
++		s_chimeraIndexBufferGone = true;
++	}
++	indexState.glActiveElementArrayBuffer = 0;
++	memset(glAttributeArrayIsEnabled, 0, sizeof(glAttributeArrayIsEnabled));
++	memset(glAttributeArrayAluDivisor, 0, sizeof(glAttributeArrayAluDivisor));
++	memset(_glVertexBufferOffset, 0, sizeof(_glVertexBufferOffset));
++	for (auto& it : g_mapGLRectEmulationGS)
++		delete it.second;
++	g_mapGLRectEmulationGS.clear();
++	sGLActiveDrawMode = 0;
++	s_chimeraTriangleIndexCount = 0;
++	for (int k = 0; k < 2; k++)
++	{
++		if (s_chimeraAutoQuads[k])
++			glDeleteBuffers(1, &s_chimeraAutoQuads[k]);
++		s_chimeraAutoQuads[k] = 0;
++		s_chimeraAutoQuadsVertices[k] = 0;
++	}
++	OpenGLSurfaceCopy_chimeraForgetContext();
++	OpenGLRenderer_chimeraForgetVertexArray();
++}
++#endif
++
+ void OpenGLRenderer::draw_init()
+ {
++#if defined(CHIMERA)
++	if (indexState.initialized && s_chimeraIndexBufferGone)
++	{
++		// a new context: the index buffer again, the rest is the host's
++		glGenBuffers(1, &indexState.glIndexCacheBuffer);
++		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexState.glIndexCacheBuffer);
++		glBufferData(GL_ELEMENT_ARRAY_BUFFER, GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR, NULL, GL_DYNAMIC_DRAW);
++		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
++		s_chimeraIndexBufferGone = false;
++		return;
++	}
++#endif
+ 	if (indexState.initialized)
+ 		return;
+ 	indexState.initialized = true;

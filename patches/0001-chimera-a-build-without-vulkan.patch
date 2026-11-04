@@ -1,0 +1,30 @@
+diff --git a/src/Cafe/HW/Latte/Core/LatteBufferData.cpp b/src/Cafe/HW/Latte/Core/LatteBufferData.cpp
+index c08c98b..dfe8d7d 100644
+--- a/src/Cafe/HW/Latte/Core/LatteBufferData.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteBufferData.cpp
+@@ -9,6 +9,13 @@
+ #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
+ #ifdef ENABLE_VULKAN
+ #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
++#else
++namespace VulkanRendererConst // chimera: the stage bits, in a build without Vulkan
++{
++	static const inline int SHADER_STAGE_INDEX_VERTEX = static_cast<int>(LatteConst::ShaderType::Vertex);
++	static const inline int SHADER_STAGE_INDEX_FRAGMENT = static_cast<int>(LatteConst::ShaderType::Pixel);
++	static const inline int SHADER_STAGE_INDEX_GEOMETRY = static_cast<int>(LatteConst::ShaderType::Geometry);
++};
+ #endif
+ 
+ template<int vectorLen>
+diff --git a/src/Cafe/HW/Latte/Core/LatteShader.cpp b/src/Cafe/HW/Latte/Core/LatteShader.cpp
+index a25e771..b1373cd 100644
+--- a/src/Cafe/HW/Latte/Core/LatteShader.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteShader.cpp
+@@ -15,6 +15,7 @@
+ #include "config/ActiveSettings.h"
+ #include "Cafe/GameProfile/GameProfile.h"
+ #include "util/containers/flat_hash_map.hpp"
++#include "util/containers/robin_hood.h" // chimera: also without the Vulkan renderer
+ #include "util/helpers/StateHasher.h"
+ #ifdef ENABLE_METAL
+ #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"

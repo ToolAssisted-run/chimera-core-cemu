@@ -1,0 +1,4912 @@
+diff --git a/src/Cafe/Account/Account.cpp b/src/Cafe/Account/Account.cpp
+index 6f576ae..2cf0265 100644
+--- a/src/Cafe/Account/Account.cpp
++++ b/src/Cafe/Account/Account.cpp
+@@ -63,8 +63,7 @@ Account::Account(uint32 persistent_id, std::wstring_view mii_name)
+ 	if (mii_name.empty())
+ 		throw std::system_error(AccountErrc::InvalidMiiName);
+ 	
+-	static std::random_device s_random_device;
+-	static std::mt19937 s_mte(s_random_device());
++	static std::mt19937 s_mte(CEMU_RANDOM_SEED());
+ 
+         // use boost library to escape static asserts in linux builds
+         boost::random::uniform_int_distribution<uint16> dist(std::numeric_limits<uint8>::min(), std::numeric_limits<uint8>::max());
+diff --git a/src/Cafe/CafeSystem.cpp b/src/Cafe/CafeSystem.cpp
+index e200033..d8d4b6b 100644
+--- a/src/Cafe/CafeSystem.cpp
++++ b/src/Cafe/CafeSystem.cpp
+@@ -370,9 +370,21 @@ void cemu_initForGame()
+ 	// input manager apply game profile
+ 	InputManager::instance().apply_game_profile();
+ 	// determine cycle offset since 1.1.2000
++#if defined(CHIMERA)
++	// chimera: the console's calendar starts where the project says (the
++	// driver's chimera_clock_start, seconds since 1970 in UTC), and the
++	// console's own time zone is UTC
++	extern int64_t chimera_clock_start();
++	const int64_t chimeraClock = chimera_clock_start();
++	uint64 secondsSince2000_UTC = (uint64)(chimeraClock - 946684800);
++	ppcCyclesSince2000_UTC = secondsSince2000_UTC * (uint64)ESPRESSO_CORE_CLOCK;
++	time_t theTime = (time_t)(chimeraClock - 946684800);
++	if (false)
++#else
+ 	uint64 secondsSince2000_UTC = (uint64)(time(NULL) - 946684800);
+ 	ppcCyclesSince2000_UTC = secondsSince2000_UTC * (uint64)ESPRESSO_CORE_CLOCK;
+ 	time_t theTime = (time(NULL) - 946684800);
++#endif
+ 	{
+ 		tm* lt = localtime(&theTime);
+ #if BOOST_OS_WINDOWS
+@@ -426,7 +438,11 @@ void cemu_initForGame()
+ 	// everything initialized
+ 	cemuLog_log(LogType::Force, "------- Run title -------");
+ 	// wait till GPU thread is initialized
++#if defined(CHIMERA)
++	chimera::vsched::Wait([]() { return g_isGPUInitFinished.load(); });
++#else
+ 	while (g_isGPUInitFinished == false) std::this_thread::sleep_for(std::chrono::milliseconds(50));
++#endif
+ 	// run coreinit rpl_entry
+ 	RPLLoader_CallCoreinitEntrypoint();
+ 	// init AX and start AX I/O thread
+@@ -921,7 +937,7 @@ namespace CafeSystem
+ 		// start system
+ 		sSystemRunning = true;
+ 		WindowSystem::NotifyGameLoaded();
+-		std::thread t(_LaunchTitleThread);
++		CEMU_THREAD t(_LaunchTitleThread);
+ 		t.detach();
+ 	}
+ 
+diff --git a/src/Cafe/HW/Espresso/PPCScheduler.cpp b/src/Cafe/HW/Espresso/PPCScheduler.cpp
+index 33bc697..43e6d22 100644
+--- a/src/Cafe/HW/Espresso/PPCScheduler.cpp
++++ b/src/Cafe/HW/Espresso/PPCScheduler.cpp
+@@ -7,6 +7,15 @@
+ #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+ #include "Cafe/CafeSystem.h"
+ 
++#if defined(CHIMERA)
++#include "chimera_ppc.h"
++#define CHIMERA_PPC_ACCOUNT(h) chimera_ppc_account(h)
++#define CHIMERA_PPC_MARK(h) chimera_ppc_mark(h)
++#else
++#define CHIMERA_PPC_ACCOUNT(h)
++#define CHIMERA_PPC_MARK(h)
++#endif
++
+ uint32 ppcThreadQuantum = 45000; // execute 45000 instructions before thread reschedule happens, this value can be overwritten by game profiles
+ 
+ void PPCInterpreter_relinquishTimeslice()
+@@ -14,21 +23,27 @@ void PPCInterpreter_relinquishTimeslice()
+ 	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
+ 	if( hCPU->remainingCycles >= 0 )
+ 	{
++		CHIMERA_PPC_ACCOUNT(hCPU);
+ 		hCPU->skippedCycles = hCPU->remainingCycles + 1;
+ 		hCPU->remainingCycles = -1;
++		CHIMERA_PPC_MARK(hCPU);
+ 	}
+ }
+ 
+ void PPCCore_boostQuantum(sint32 numCycles)
+ {
+ 	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
++	CHIMERA_PPC_ACCOUNT(hCPU);
+ 	hCPU->remainingCycles += numCycles;
++	CHIMERA_PPC_MARK(hCPU);
+ }
+ 
+ void PPCCore_deboostQuantum(sint32 numCycles)
+ {
+ 	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
++	CHIMERA_PPC_ACCOUNT(hCPU);
+ 	hCPU->remainingCycles -= numCycles;
++	CHIMERA_PPC_MARK(hCPU);
+ }
+ 
+ namespace coreinit
+@@ -40,6 +55,9 @@ void PPCCore_switchToScheduler()
+ {
+ 	cemu_assert_debug(__OSHasSchedulerLock() == false); // scheduler lock must not be hold past thread time slice
+ 	cemu_assert_debug(PPCInterpreter_getCurrentInstance()->coreInterruptMask != 0 || CafeSystem::GetForegroundTitleId() == 0x000500001019e600);
++#if defined(CHIMERA)
++	chimera_ppc_safepoint();
++#endif
+ 	__OSLockScheduler();
+ 	coreinit::__OSThreadSwitchToNext();
+ 	__OSUnlockScheduler();
+@@ -75,8 +93,10 @@ PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR)
+ 	// execute code until we return from the function
+ 	while (true)
+ 	{
++		CHIMERA_PPC_ACCOUNT(hCPU);
+ 		hCPU->remainingCycles = ppcThreadQuantum;
+ 		hCPU->skippedCycles = 0;
++		CHIMERA_PPC_MARK(hCPU);
+ 		if (hCPU->remainingCycles > 0)
+ 		{
+ 			// try to enter recompiler immediately
+@@ -90,8 +110,10 @@ PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR)
+ 		if (hCPU->instructionPointer == 0)
+ 		{
+ 			// restore remaining cycles
++			CHIMERA_PPC_ACCOUNT(hCPU);
+ 			hCPU->remainingCycles += hCPU->skippedCycles;
+ 			hCPU->skippedCycles = 0;
++			CHIMERA_PPC_MARK(hCPU);
+ 			break;
+ 		}
+ 		coreinit::OSYieldThread();
+diff --git a/src/Cafe/HW/Espresso/PPCTimer.cpp b/src/Cafe/HW/Espresso/PPCTimer.cpp
+index 257973a..6c96182 100644
+--- a/src/Cafe/HW/Espresso/PPCTimer.cpp
++++ b/src/Cafe/HW/Espresso/PPCTimer.cpp
+@@ -1,4 +1,20 @@
+ #include "Cafe/HW/Espresso/Const.h"
++
++#if defined(CHIMERA)
++// chimera: the console's time is the machine's clock (chimera_vsched.h), in
++// Espresso core cycles counted from what the processor ran, and not the
++// host's time stamp counter
++#include "chimera_ppc.h"
++
++void PPCTimer_init() {}
++void PPCTimer_start() {}
++bool PPCTimer_isReady() { return true; }
++void PPCTimer_waitForInit() {}
++uint64 PPCTimer_getRawTsc() { return chimera_ppc_cycles(); }
++uint64 PPCTimer_microsecondsToTsc(uint64 us) { return us * (uint64)(Espresso::CORE_CLOCK / 1000000); }
++uint64 PPCTimer_tscToMicroseconds(uint64 us) { return us / (uint64)(Espresso::CORE_CLOCK / 1000000); }
++uint64 PPCTimer_getFromRDTSC() { return chimera_ppc_cycles(); }
++#else
+ #include "config/ActiveSettings.h"
+ #include "util/helpers/fspinlock.h"
+ #include "util/highresolutiontimer/HighResolutionTimer.h"
+@@ -165,3 +181,5 @@ uint64 PPCTimer_getFromRDTSC()
+ 	sTimerSpinlock.unlock();
+ 	return _tickSummary;
+ }
++
++#endif // CHIMERA
+diff --git a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
+index 6be50ec..951e779 100644
+--- a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
++++ b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
+@@ -20,7 +20,11 @@
+ #endif
+ #include "util/highresolutiontimer/HighResolutionTimer.h"
+ 
++#if defined(CHIMERA)
++#define PPCREC_FORCE_SYNCHRONOUS_COMPILATION	1 // chimera: a function is compiled where it is first met, the same in every run
++#else
+ #define PPCREC_FORCE_SYNCHRONOUS_COMPILATION	0 // if 1, then function recompilation will block and execute on the thread that called PPCRecompiler_visitAddressNoBlock
++#endif
+ #define PPCREC_LOG_RECOMPILATION_RESULTS		0
+ 
+ struct ppcInvalidationRange
+@@ -704,7 +708,9 @@ void PPCRecompiler_init()
+ 
+ 	// launch recompilation thread
+     s_ppcRecompilerState.workerThreadStopSignal = false;
++#if !PPCREC_FORCE_SYNCHRONOUS_COMPILATION
+     s_ppcRecompilerState.workerThread = std::thread(PPCRecompiler_thread);
++#endif
+ }
+ 
+ void PPCRecompiler_Shutdown()
+diff --git a/src/Cafe/HW/Latte/Core/Latte.h b/src/Cafe/HW/Latte/Core/Latte.h
+index 22d2dc0..8334f59 100644
+--- a/src/Cafe/HW/Latte/Core/Latte.h
++++ b/src/Cafe/HW/Latte/Core/Latte.h
+@@ -162,6 +162,10 @@ void LatteStreamout_FinishDrawcall(bool useDirectMemoryMode);
+ 
+ void LatteTiming_Init();
+ void LatteTiming_HandleTimedVsync();
++#if defined(CHIMERA)
++uint64 LatteTiming_chimeraNextVsync();
++uint64 LatteTiming_chimeraVsyncTime(uint64 n);
++#endif
+ 
+ // command processor
+ 
+diff --git a/src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp b/src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp
+index 12873b0..2053e3e 100644
+--- a/src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp
+@@ -107,6 +107,9 @@ void LatteAsyncCommand_queueTextureCopy(const LatteSurfaceCopyParam& src, const
+ 
+ void LatteAsyncCommands_waitUntilAllProcessed()
+ {
++#if defined(CHIMERA)
++	chimera::vsched::Wait([]() { return LatteAsyncCommandQueue.empty(); });
++#endif
+ 	while (LatteAsyncCommandQueue.empty() == false)
+ 	{
+ 		_mm_pause();
+@@ -116,6 +119,13 @@ void LatteAsyncCommands_waitUntilAllProcessed()
+ /*
+  * Called by the GPU command processor frequently
+  */
++#if defined(CHIMERA)
++bool LatteAsyncCommands_chimeraPending()
++{
++	return !LatteAsyncCommandQueue.empty();
++}
++#endif
++
+ void LatteAsyncCommands_checkAndExecute()
+ {
+ 	// quick check if queue is empty (requires no lock)
+diff --git a/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp b/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
+index a7167ba..1a8a057 100644
+--- a/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
+@@ -165,6 +165,24 @@ void LatteCP_signalEnterWait()
+ * Read a U32 from the command buffer
+ * If no data is available then wait in a busy loop
+ */
++#if defined(CHIMERA)
++bool LatteThread_chimeraOSScreenPending();
++bool LatteAsyncCommands_chimeraPending();
++
++// chimera: what the command processor waits for when it has no command: a
++// command, a picture the OSScreen API put up, an asynchronous command, or
++// the next vertical blank
++void LatteThread_chimeraCheckContext();
++
++static void LatteCP_chimeraWaitForWork()
++{
++	chimera::vsched::Wait([]() {
++		return TCL::TCLGPUHasRBWord() || LatteThread_chimeraOSScreenPending() || LatteAsyncCommands_chimeraPending();
++	}, LatteTiming_chimeraNextVsync());
++	LatteThread_chimeraCheckContext();
++}
++#endif
++
+ uint32 LatteCP_readU32Deprc()
+ {
+ 	// no display list active
+@@ -173,6 +191,15 @@ uint32 LatteCP_readU32Deprc()
+ 		uint32 cmdWord;
+ 		if ( TCL::TCLGPUReadRBWord(cmdWord) )
+ 			return cmdWord;
++#if defined(CHIMERA)
++		g_renderer->NotifyLatteCommandProcessorIdle();
++		LatteThread_HandleOSScreen();
++		LatteTiming_HandleTimedVsync();
++		LatteAsyncCommands_checkAndExecute();
++		if (!TCL::TCLGPUHasRBWord())
++			LatteCP_chimeraWaitForWork();
++		continue;
++#endif
+ 
+ 		g_renderer->NotifyLatteCommandProcessorIdle(); // let the renderer know in case it wants to flush any commands
+ 		performanceMonitor.gpuTime_idleTime.beginMeasuring();
+@@ -534,6 +561,16 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
+ 			// check if any GPU events happened
+ 			LatteTiming_HandleTimedVsync();
+ 			LatteAsyncCommands_checkAndExecute();
++#if defined(CHIMERA)
++			// chimera: wait for the memory to change (the processor writes it)
++			{
++				const uint32 lastValue = _swapEndianU32(*fencePtr);
++				chimera::vsched::Wait([fencePtr, lastValue]() {
++					return _swapEndianU32(*fencePtr) != lastValue || LatteAsyncCommands_chimeraPending();
++				}, LatteTiming_chimeraNextVsync());
++				LatteThread_chimeraCheckContext();
++			}
++#endif
+ 		}
+ 		performanceMonitor.gpuTime_fenceTime.endMeasuring();
+ 	}
+@@ -639,9 +676,14 @@ LatteCMDPtr LatteCP_itMemSemaphore(LatteCMDPtr cmd, uint32 nWords)
+ 			uint64le oldVal = semaphoreData->load();
+ 			if (oldVal == 0)
+ 			{
++#if defined(CHIMERA)
++				chimera::vsched::Wait([semaphoreData]() { return semaphoreData->load() != 0; });
++				LatteThread_chimeraCheckContext();
++#else
+ 				loopCount++;
+ 				if (loopCount > 2000)
+ 					std::this_thread::yield();
++#endif
+ 				continue;
+ 			}
+ 			if (semaphoreData->compare_exchange_strong(oldVal, oldVal - 1))
+@@ -972,7 +1014,12 @@ LatteCMDPtr LatteCP_itHLEWaitForFlip(LatteCMDPtr cmd, uint32 nWords)
+ 		}
+ 		// check if any GPU events happened
+ 		LatteTiming_HandleTimedVsync();
++#if defined(CHIMERA)
++		chimera::vsched::Wait([currentFlipCount]() { return currentFlipCount != LatteGPUState.flipCounter; }, LatteTiming_chimeraNextVsync());
++		LatteThread_chimeraCheckContext();
++#else
+ 		std::this_thread::yield();
++#endif
+ 	}
+ 	return cmd;
+ }
+diff --git a/src/Cafe/HW/Latte/Core/LatteQuery.cpp b/src/Cafe/HW/Latte/Core/LatteQuery.cpp
+index a8329e6..dfe6592 100644
+--- a/src/Cafe/HW/Latte/Core/LatteQuery.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteQuery.cpp
+@@ -74,8 +74,19 @@ void LatteQuery_UpdateFinishedQueries()
+ 			continue;
+ 		// check if result is available
+ 		uint64 numSamplesPassed;
++#if defined(CHIMERA)
++		// chimera: a query ended is waited for where it is looked at, so the
++		// console's memory gets its answer at the same point every run
++		if (!queryObject->getResult(numSamplesPassed))
++		{
++			g_renderer->occlusionQuery_flush();
++			while (!queryObject->getResult(numSamplesPassed))
++				;
++		}
++#else
+ 		if (!queryObject->getResult(numSamplesPassed))
+ 			break;
++#endif
+ 
+ 		cemu_assert_debug(latestQueryFinishedEventId < queryObject->queryEventEnd);
+ 		latestQueryFinishedEventId = queryObject->queryEventEnd;
+@@ -129,8 +140,20 @@ void LatteQuery_endActiveRendererQuery(uint64 currentEventId)
+ 	}
+ }
+ 
++#if defined(CHIMERA)
++// chimera: the setting Occlusion Queries on "fake": no query is asked of the
++// card; every object is reported fully visible when its query ends, with
++// the number upstream gives Xenoblade Chronicles X for the same purpose
++bool chimera_fake_occlusion();
++constexpr uint64 kChimeraFakeSamples = 0x100000;
++#endif
++
+ void LatteQuery_BeginOcclusionQuery(MPTR queryMPTR)
+ {
++#if defined(CHIMERA)
++	if (chimera_fake_occlusion())
++		return;
++#endif
+ 	if (checkQueriesCounter < 7)
+ 	{
+ 		checkQueriesCounter++;
+@@ -168,6 +191,16 @@ void LatteQuery_EndOcclusionQuery(MPTR queryMPTR)
+ {
+ 	if (queryMPTR == MPTR_NULL)
+ 		return;
++#if defined(CHIMERA)
++	if (chimera_fake_occlusion())
++	{
++		LatteGX2QueryInformation fake{};
++		fake.queryMPTR = queryMPTR;
++		fake.sampleSum = kChimeraFakeSamples;
++		LatteQuery_finishGX2Query(&fake);
++		return;
++	}
++#endif
+ 	uint64 currentEventId = LatteQuery_getNextEventId();
+ 	// mark query binding as ended
+ 	for(auto& it : list_activeGX2Queries2)
+diff --git a/src/Cafe/HW/Latte/Core/LatteShaderCache.cpp b/src/Cafe/HW/Latte/Core/LatteShaderCache.cpp
+index ab2898b..3f9c69e 100644
+--- a/src/Cafe/HW/Latte/Core/LatteShaderCache.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteShaderCache.cpp
+@@ -404,6 +404,13 @@ void LatteShaderCache_Load()
+ 		break;
+ 	}
+ 
++#if defined(CHIMERA)
++	// chimera: no shader cache on a disk. Every run compiles what it draws
++	// (a cache would be the core's own files, kept in every state and
++	// growing, and a driver's binaries are of one card)
++	LatteShaderCache_finish();
++	return;
++#endif
+ 	// calculate extraVersion for transferable and precompiled shader cache
+ 	uint32 transferableExtraVersion = SHADER_CACHE_GENERIC_EXTRA_VERSION;
+     s_shaderCacheGeneric = FileCache::Open(pathGeneric, false, transferableExtraVersion); // legacy extra version (1.25.0 - 1.25.1b)
+diff --git a/src/Cafe/HW/Latte/Core/LatteTextureReadback.cpp b/src/Cafe/HW/Latte/Core/LatteTextureReadback.cpp
+index 078915c..86dce37 100644
+--- a/src/Cafe/HW/Latte/Core/LatteTextureReadback.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteTextureReadback.cpp
+@@ -130,6 +130,16 @@ void LatteTextureReadback_UpdateFinishedTransfers(bool forceFinish)
+ 		}
+ 		else
+ 		{
++#if defined(CHIMERA)
++			// chimera: a transfer started is finished where it is looked at,
++			// whatever the card's speed, so the console's memory gets it at
++			// the same point every run
++			if (!readbackInfo->IsFinished())
++			{
++				readbackInfo->ForceFinish();
++				continue;
++			}
++#endif
+ 			if (!readbackInfo->IsFinished())
+ 				break;
+ 			readbackInfo->waitStartTime = HighResolutionTimer().now().getTick();
+diff --git a/src/Cafe/HW/Latte/Core/LatteThread.cpp b/src/Cafe/HW/Latte/Core/LatteThread.cpp
+index 743ab67..49cfb78 100644
+--- a/src/Cafe/HW/Latte/Core/LatteThread.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteThread.cpp
+@@ -104,6 +104,78 @@ bool LatteHandleOSScreen_DRC()
+ 	return true;
+ }
+ 
++#if defined(CHIMERA)
++#include "chimera_gpu.h"
++#include "Cafe/HW/Latte/Core/LatteShader.h"
++#include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
++void OpenGLRenderer_chimeraForgetContext();
++void ImGui_ImplOpenGL3_DestroyDeviceObjects();
++
++// chimera: the context the renderer's objects were made in (0: none yet). It
++// lives in the machine's memory, so a state remembers the context of the
++// process that saved it, and a load in another one - or the new context the
++// frontend gives after any load - is noticed.
++uint64 s_chimeraGpuContext = 0;
++
++// The renderer made again on a new GPU context. Everything it holds - the
++// textures, the shaders, the buffers, its own objects - is a cache of the
++// console's memory and the GPU's registers, which a state holds; so all of
++// it is dropped and made again as the GPU needs it. Dropped first (the old
++// names delete nothing now), made after, so no new object is given a name
++// an old call could still reach.
++static void LatteThread_chimeraRemakeRenderer()
++{
++	cemuLog_log(LogType::Force, "chimera: the GPU context moved; making the renderer again");
++	LatteBufferCache_UnloadAll();
++	LatteTC_UnloadAllTextures();
++	LatteSHRC_UnloadAll();
++	RendererOutputShader::ShutdownStatic();
++	OpenGLRenderer_chimeraForgetContext();
++	chimera_gpu_context_forget();
++	ImGui_ImplOpenGL3_DestroyDeviceObjects();
++	{
++		Renderer* old = g_renderer.release();
++		auto renderer = std::make_unique<OpenGLRenderer>();
++		renderer->ChimeraTakeImgui(*old);
++		delete old; // its last objects' old names
++		g_renderer = std::move(renderer);
++	}
++	g_renderer->Initialize();
++	RendererOutputShader::InitializeStatic();
++	LatteTexture_init();
++	LatteTC_Init();
++	LatteBufferCache_init(164 * 1024 * 1024);
++	LatteQuery_Init();
++	LatteSHRC_Init();
++	LatteStreamout_InitCache();
++	sint32 w, h;
++	WindowSystem::GetWindowPhysSize(w, h);
++	g_renderer->renderTarget_setViewport(0, 0, w, h, 0.0f, 1.0f);
++	s_chimeraGpuContext = chimera_gpu_context_id();
++}
++
++// Asked by the GPU wherever it may have been parked when a frame ended (its
++// waits, between commands): is the context still the one its objects are in?
++void LatteThread_chimeraCheckContext()
++{
++	const uint64 live = chimera_gpu_context_id();
++	if (live == 0 || s_chimeraGpuContext == 0 || live == s_chimeraGpuContext)
++		return;
++	LatteThread_chimeraRemakeRenderer();
++}
++
++// chimera: did the OSScreen API put up a picture the GPU has not shown yet
++bool LatteThread_chimeraOSScreenPending()
++{
++	for (int i = 0; i < 2; i++)
++	{
++		if (LatteGPUState.osScreen.screen[i].isEnabled && LatteGPUState.osScreen.screen[i].flipExecuteCount != LatteGPUState.osScreen.screen[i].flipRequestCount)
++			return true;
++	}
++	return false;
++}
++#endif
++
+ void LatteThread_HandleOSScreen()
+ {
+ 	bool swapTV = LatteHandleOSScreen_TV();
+@@ -154,6 +226,9 @@ int Latte_ThreadEntry()
+ 	}
+ 
+ 	sLatteThreadFinishedInit = true;
++#if defined(CHIMERA)
++	s_chimeraGpuContext = chimera_gpu_context_id();
++#endif
+ 
+ 	// register debug handler
+ 	if (cemuLog_isLoggingEnabled(LogType::OpenGLLogging))
+@@ -168,7 +243,7 @@ int Latte_ThreadEntry()
+ 		g_renderer->DrawEmptyFrame(true);
+ 		g_renderer->DrawEmptyFrame(false);
+ 		g_renderer->CancelScreenshotRequest(); // keep the screenshot request queue empty
+-		std::this_thread::sleep_for(std::chrono::milliseconds(1000/60));
++		CEMU_SLEEP_FOR(std::chrono::milliseconds(1000/60));
+ 	}
+ 
+ 	g_renderer->DrawEmptyFrame(true);
+@@ -201,8 +276,16 @@ int Latte_ThreadEntry()
+ 	// wait until CPU has called GX2Init()
+ 	while (LatteGPUState.gx2InitCalled == 0)
+ 	{
++#if defined(CHIMERA)
++		// chimera: wait on the machine's clock for GX2 or for a picture of
++		// the OSScreen API (a program that never starts GX2 draws only so)
++		chimera::vsched::Wait([]() { return LatteGPUState.gx2InitCalled != 0 || LatteThread_chimeraOSScreenPending(); }, LatteTiming_chimeraNextVsync());
++		LatteThread_chimeraCheckContext();
++		LatteTiming_HandleTimedVsync();
++#else
+ 		std::this_thread::yield();
+ 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
++#endif
+ 		LatteThread_HandleOSScreen();
+ 		if (Latte_GetStopSignal())
+ 			LatteThread_Exit();
+@@ -212,7 +295,7 @@ int Latte_ThreadEntry()
+ 	return 0;
+ }
+ 
+-std::thread sLatteThread;
++CEMU_THREAD sLatteThread;
+ std::mutex sLatteThreadStateMutex;
+ 
+ // initializes GPU thread which in turn also activates graphic packs
+@@ -223,8 +306,11 @@ void Latte_Start()
+ 	cemu_assert_debug(!sLatteThreadRunning);
+ 	sLatteThreadRunning = true;
+ 	sLatteThreadFinishedInit = false;
+-	sLatteThread = std::thread(Latte_ThreadEntry);
++	sLatteThread = CEMU_THREAD(Latte_ThreadEntry);
+ 	// wait until initialized
++#if defined(CHIMERA)
++	chimera::vsched::Wait([]() { return sLatteThreadFinishedInit.load(); });
++#endif
+ 	while (!sLatteThreadFinishedInit)
+ 	{
+ 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+diff --git a/src/Cafe/HW/Latte/Core/LatteTiming.cpp b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+index 60f4c52..b823d1c 100644
+--- a/src/Cafe/HW/Latte/Core/LatteTiming.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+@@ -68,6 +68,23 @@ bool LatteTiming_IsUsingHostDrivenVSync()
+ 	return s_usingHostDrivenVSync;
+ }
+ 
++#if defined(CHIMERA)
++// chimera: the vertical blank comes at exact moments of the machine's clock,
++// the Wii U's 59.94 Hz (60000/1001), counted from when the console was
++// switched on: blank n at n * 1001/60000 s
++uint64 s_chimeraVsyncCount = 0;
++
++uint64 LatteTiming_chimeraVsyncTime(uint64 n)
++{
++	return (uint64)(((unsigned __int128)n * 1001u * chimera::vsched::kCoreClock) / 60000u);
++}
++
++uint64 LatteTiming_chimeraNextVsync()
++{
++	return LatteTiming_chimeraVsyncTime(s_chimeraVsyncCount + 1);
++}
++#endif
++
+ void LatteTiming_Init()
+ {
+ 	LatteGPUState.timer_frequency = HighResolutionTimer::getFrequency();
+@@ -155,6 +172,19 @@ void LatteTiming_NotifyHostVSync()
+ // handle timed vsync event
+ void LatteTiming_HandleTimedVsync()
+ {
++#if defined(CHIMERA)
++	// chimera: the vertical blank on the machine's clock; the queries and
++	// the readbacks are looked at where upstream looks at them, and what is
++	// not done yet is waited for (LatteQuery.cpp, LatteTextureReadback.cpp)
++	if (chimera::vsched::Now() >= LatteTiming_chimeraNextVsync())
++	{
++		s_chimeraVsyncCount++;
++		LatteTiming_signalVsync();
++		LatteQuery_UpdateFinishedQueries();
++		LatteTextureReadback_UpdateFinishedTransfers(false);
++	}
++	return;
++#endif
+ 	// simulate VSync
+ 	uint64 currentTimer = HighResolutionTimer::now().getTick();
+ 	if( currentTimer >= LatteGPUState.timer_nextVSync )
+diff --git a/src/Cafe/HW/Latte/Renderer/Renderer.cpp b/src/Cafe/HW/Latte/Renderer/Renderer.cpp
+index 35991cd..5105824 100644
+--- a/src/Cafe/HW/Latte/Renderer/Renderer.cpp
++++ b/src/Cafe/HW/Latte/Renderer/Renderer.cpp
+@@ -35,6 +35,10 @@ bool Renderer::GetVRAMInfo(int& usageInMB, int& totalInMB) const
+ 
+ void Renderer::Initialize()
+ {
++#if defined(CHIMERA)
++	if (imguiFontAtlas)
++		return; // made again on a new GPU context: the imgui contexts were handed over
++#endif
+ 	// imgui
+ 	imguiFontAtlas = new ImFontAtlas();
+ 	imguiFontAtlas->AddFontDefault();
+diff --git a/src/Cafe/HW/Latte/Renderer/Renderer.h b/src/Cafe/HW/Latte/Renderer/Renderer.h
+index fa77fd9..6081880 100644
+--- a/src/Cafe/HW/Latte/Renderer/Renderer.h
++++ b/src/Cafe/HW/Latte/Renderer/Renderer.h
+@@ -58,6 +58,18 @@ public:
+ 
+ 	virtual void Initialize();
+ 	virtual void Shutdown();
++#if defined(CHIMERA)
++	// chimera: a renderer made again on a new GPU context keeps the old one's
++	// imgui contexts and fonts (they hold no GPU object)
++	void ChimeraTakeImgui(Renderer& from)
++	{
++		imguiFontAtlas = from.imguiFontAtlas;
++		imguiTVContext = from.imguiTVContext;
++		imguiPadContext = from.imguiPadContext;
++		from.imguiFontAtlas = nullptr;
++		from.imguiTVContext = from.imguiPadContext = nullptr;
++	}
++#endif
+ 	virtual bool IsPadWindowActive() = 0;
+ 
+ 	virtual bool GetVRAMInfo(int& usageInMB, int& totalInMB) const;
+diff --git a/src/Cafe/IOSU/ODM/iosu_odm.cpp b/src/Cafe/IOSU/ODM/iosu_odm.cpp
+index 14ba4f5..c1aef9d 100644
+--- a/src/Cafe/IOSU/ODM/iosu_odm.cpp
++++ b/src/Cafe/IOSU/ODM/iosu_odm.cpp
+@@ -13,7 +13,7 @@ namespace iosu
+ 		using namespace iosu::kernel;
+ 
+ 		std::string s_devicePath = "/dev/odm";
+-		std::thread s_serviceThread;
++		CEMU_THREAD s_serviceThread;
+ 		std::atomic_bool s_requestStop{false};
+ 		std::atomic_bool s_isRunning{false};
+ 		std::atomic_bool s_threadInitialized{ false };
+@@ -144,8 +144,8 @@ namespace iosu
+ 			s_odmStaticData.Allocate();
+ 			s_threadInitialized = false;
+ 			s_requestStop = false;
+-			s_serviceThread = std::thread(&ODMServiceThread);
+-			while (!s_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++			s_serviceThread = CEMU_THREAD(&ODMServiceThread);
++			while (!s_threadInitialized) CEMU_YIELD();
+ 		}
+ 
+ 		void Shutdown()
+diff --git a/src/Cafe/IOSU/PDM/iosu_pdm.cpp b/src/Cafe/IOSU/PDM/iosu_pdm.cpp
+index b9dda44..7a30097 100644
+--- a/src/Cafe/IOSU/PDM/iosu_pdm.cpp
++++ b/src/Cafe/IOSU/PDM/iosu_pdm.cpp
+@@ -19,8 +19,8 @@ namespace iosu
+ {
+ 	namespace pdm
+ 	{
+-		std::recursive_mutex sPlaystatsLock;
+-		std::recursive_mutex sDiaryLock;
++		CEMU_RECURSIVE_MUTEX sPlaystatsLock;
++		CEMU_RECURSIVE_MUTEX sDiaryLock;
+ 
+ 		fs::path GetPDFile(const char* filename)
+ 		{
+@@ -45,7 +45,7 @@ namespace iosu
+ 		uint16 GetTodaysDayIndex()
+ 		{
+ 			chrono_d::sys_days startDateDay(chrono_d::year(2000) / chrono_d::January / chrono_d::day(1));
+-			chrono_d::sys_days currentDateDay = chrono_d::floor<chrono_d::days>(std::chrono::system_clock::now());
++			chrono_d::sys_days currentDateDay = chrono_d::floor<chrono_d::days>(CEMU_SYSTEM_NOW());
+ 			return (uint16)(currentDateDay - startDateDay).count();
+ 		}
+ 
+@@ -382,7 +382,7 @@ namespace iosu
+ 			return true;
+ 		}
+ 
+-		std::thread sPDMTimeTrackingThread;
++		CEMU_THREAD sPDMTimeTrackingThread;
+ 		CounterSemaphore sPDMSem;
+ 		std::atomic_bool sPDMRequestExitThread{ false };
+ 
+@@ -391,14 +391,14 @@ namespace iosu
+ 			SetThreadName("PlayDiaryThread");
+ 			PlayStatsEntry* playStatsEntry = PlayStats_BeginNewTracking(titleId);
+ 
+-			auto startTime = std::chrono::steady_clock::now();
++			auto startTime = CEMU_STEADY_NOW();
+ 			uint32 prevMinuteCounter = 0;
+ 			while (true)
+ 			{
+ 				sPDMSem.decrementWithWaitAndTimeout(15000);
+ 				if (sPDMRequestExitThread.load(std::memory_order::relaxed))
+ 					break;
+-				auto currentTime = std::chrono::steady_clock::now();
++				auto currentTime = CEMU_STEADY_NOW();
+ 				uint32 elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - startTime).count();
+ 				if (elapsedMinutes > prevMinuteCounter)
+ 				{
+@@ -447,7 +447,7 @@ namespace iosu
+ 				PDMLoadAll();
+ 				auto titleId = CafeSystem::GetForegroundTitleId();
+ 				sPDMRequestExitThread = false;
+-				sPDMTimeTrackingThread = std::thread(TimeTrackingThread, titleId);
++				sPDMTimeTrackingThread = CEMU_THREAD(TimeTrackingThread, titleId);
+ 			}
+ 			void TitleStop() override
+ 			{
+diff --git a/src/Cafe/IOSU/fsa/iosu_fsa.cpp b/src/Cafe/IOSU/fsa/iosu_fsa.cpp
+index bba8b87..71688cb 100644
+--- a/src/Cafe/IOSU/fsa/iosu_fsa.cpp
++++ b/src/Cafe/IOSU/fsa/iosu_fsa.cpp
+@@ -17,7 +17,7 @@ namespace iosu
+ 		IOSMsgQueueId sFSAIoMsgQueue;
+ 		constinit IOSUStaticData s_fsaStaticData;
+ 		CafeStaticVar<iosu::kernel::IOSMessage, 352> _m_sFSAIoMsgQueueMsgBuffer{s_fsaStaticData};
+-		std::thread sFSAIoThread;
++		CEMU_THREAD sFSAIoThread;
+ 
+ 		struct FSAClient // IOSU's counterpart to the coreinit FSClient struct
+ 		{
+@@ -895,7 +895,7 @@ namespace iosu
+ 			IOS_ERROR r = IOS_RegisterResourceManager("/dev/fsa", sFSAIoMsgQueue);
+ 			IOS_DeviceAssociateId("/dev/fsa", 11);
+ 			cemu_assert(!IOS_ResultIsError(r));
+-			sFSAIoThread = std::thread(FSAIoThread);
++			sFSAIoThread = CEMU_THREAD(FSAIoThread);
+ 		}
+ 
+ 		void Shutdown()
+diff --git a/src/Cafe/IOSU/kernel/iosu_kernel.cpp b/src/Cafe/IOSU/kernel/iosu_kernel.cpp
+index 0c6bd2d..6fed9f9 100644
+--- a/src/Cafe/IOSU/kernel/iosu_kernel.cpp
++++ b/src/Cafe/IOSU/kernel/iosu_kernel.cpp
+@@ -9,7 +9,7 @@ namespace iosu
+ {
+ 	namespace kernel
+ 	{
+-		std::mutex sInternalMutex;
++		CEMU_MUTEX sInternalMutex;
+ 		constinit IOSUStaticData s_kernelStaticData;
+ 
+ 		void IOS_DestroyResourceManagerForQueueId(IOSMsgQueueId msgQueueId);
+@@ -45,8 +45,8 @@ namespace iosu
+ 			}
+ 
+ 			/* HLE extension */
+-			std::condition_variable cv_send;
+-			std::condition_variable cv_recv;
++			CEMU_CONDVAR cv_send;
++			CEMU_CONDVAR cv_recv;
+ 		};
+ 
+ 		std::array<IOSMessageQueue, 750> sMsgQueuePool;
+@@ -169,8 +169,8 @@ namespace iosu
+ 
+ 		/* timer */
+ 
+-		std::mutex sTimerMutex;
+-		std::condition_variable sTimerCV;
++		CEMU_MUTEX sTimerMutex;
++		CEMU_CONDVAR sTimerCV;
+ 		std::atomic_bool sTimerThreadStop;
+ 
+ 		struct IOSTimer
+@@ -289,7 +289,11 @@ namespace iosu
+ 				}
+ 				else
+ 				{
++#if defined(CHIMERA)
++					sTimerCV.wait_for(_l, std::chrono::nanoseconds(timer.nextFire - now)); // chimera: the clock's ticks are nanoseconds; a rounded-down wait would never end
++#else
+ 					sTimerCV.wait_for(_l, std::chrono::microseconds(HighResolutionTimer::ticksToMicroseconds(timer.nextFire - now)));
++#endif
+ 				}
+ 			}
+ 		}
+@@ -387,7 +391,11 @@ namespace iosu
+ 			// stores a copy of incoming IPC requests with some extra information required for replies
+ 			IPCCommandBody body; // our dispatchable copy
+ 			IPCIoctlVector vecCopy[8]; // our copy of the Ioctlv vector array
++#if defined(CHIMERA)
++			MEMPTR<IPCCommandBody> originalBody; // chimera: kept as the console's address, not the host's (this lives in the console's memory)
++#else
+ 			IPCCommandBody* originalBody; // the original command that was sent to us
++#endif
+ 			uint32 ppcCoreIndex;
+ 			IOSDevHandle replyHandle; // handle for outgoing replies
+ 			bool isAllocated{false};
+@@ -581,7 +589,7 @@ namespace iosu
+ 			return r;
+ 		}
+ 
+-		std::mutex sMtxReply[3];
++		CEMU_MUTEX sMtxReply[3];
+ 
+ 		void _IPCReplyAndRelease(IOSDispatchableCommand* dispatchCmd, uint32 result)
+ 		{
+@@ -762,7 +770,7 @@ namespace iosu
+ 				_IPCInitDispatchablePool();
+ 				// start timer thread
+ 				sTimerThreadStop = false;
+-				m_timerThread = std::thread(IOSTimerThread);
++				m_timerThread = CEMU_THREAD(IOSTimerThread);
+ 			}
+ 
+ 			void SystemExit() override
+@@ -776,7 +784,7 @@ namespace iosu
+ 				s_kernelStaticData.Deallocate();
+ 			}
+ 
+-			std::thread m_timerThread;
++			CEMU_THREAD m_timerThread;
+ 		}sIOSUModuleKernel;
+ 
+ 		IOSUModule* GetModule()
+diff --git a/src/Cafe/IOSU/legacy/iosu_acp.cpp b/src/Cafe/IOSU/legacy/iosu_acp.cpp
+index 06f9da6..2c26d74 100644
+--- a/src/Cafe/IOSU/legacy/iosu_acp.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_acp.cpp
+@@ -567,7 +567,7 @@ namespace iosu
+ 	{
+ 		if (iosuAcp.isInitialized)
+ 			return;
+-		std::thread t(iosuAcp_thread);
++		CEMU_THREAD t(iosuAcp_thread);
+ 		t.detach();
+ 		iosuAcp.isInitialized = true;
+ 	}
+diff --git a/src/Cafe/IOSU/legacy/iosu_act.cpp b/src/Cafe/IOSU/legacy/iosu_act.cpp
+index dc4b2cc..281da5e 100644
+--- a/src/Cafe/IOSU/legacy/iosu_act.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_act.cpp
+@@ -26,7 +26,7 @@ static_assert(sizeof(NexToken) == 0x25C);
+ struct  
+ {
+ 	bool isInitialized;
+-	std::mutex actMutex;
++	CEMU_MUTEX actMutex;
+ }iosuAct = { };
+ 
+ // account manager
+@@ -875,7 +875,7 @@ void iosuAct_init_depr()
+ {
+ 	if (iosuAct.isInitialized)
+ 		return;
+-	std::thread t(iosuAct_thread);
++	CEMU_THREAD t(iosuAct_thread);
+ 	t.detach();
+ 	iosuAct.isInitialized = true;
+ }
+diff --git a/src/Cafe/IOSU/legacy/iosu_fpd.cpp b/src/Cafe/IOSU/legacy/iosu_fpd.cpp
+index 754b6c2..e29118c 100644
+--- a/src/Cafe/IOSU/legacy/iosu_fpd.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_fpd.cpp
+@@ -13,7 +13,7 @@
+ #include "Common/socket.h"
+ #include "Common/CafeString.h"
+ 
+-std::mutex g_friend_notification_mutex;
++CEMU_MUTEX g_friend_notification_mutex;
+ std::vector< std::pair<std::string, int> > g_friend_notifications;
+ 
+ namespace iosu
+@@ -67,7 +67,7 @@ namespace iosu
+ 
+ 		  private:
+ 			std::vector<NotificationEntry> m_notificationQueue;
+-			std::mutex m_mtxNotificationQueue;
++			CEMU_MUTEX m_mtxNotificationQueue;
+ 			std::atomic_uint64_t m_notificationQueueIndex{1};
+ 		}g_NotificationQueue;
+ 
+@@ -76,7 +76,7 @@ namespace iosu
+ 			bool isThreadStarted;
+ 			bool isInitialized2;
+ 			NexFriends* nexFriendSession;
+-			std::mutex mtxFriendSession;
++			CEMU_MUTEX mtxFriendSession;
+ 			// session state
+ 			std::atomic_bool sessionStarted{false};
+ 			// current state
+diff --git a/src/Cafe/IOSU/legacy/iosu_ioctl.cpp b/src/Cafe/IOSU/legacy/iosu_ioctl.cpp
+index 22e5a55..08fa2ac 100644
+--- a/src/Cafe/IOSU/legacy/iosu_ioctl.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_ioctl.cpp
+@@ -10,7 +10,7 @@
+ RingBuffer<ioQueueEntry_t*, 256> _ioctlRingbuffer[IOS_DEVICE_COUNT];
+ CounterSemaphore _ioctlRingbufferSemaphore[IOS_DEVICE_COUNT];
+ 
+-std::mutex ioctlMutex;
++CEMU_MUTEX ioctlMutex;
+ 
+ sint32 iosuIoctl_pushAndWait(uint32 ioctlHandle, ioQueueEntry_t* ioQueueEntry)
+ {
+diff --git a/src/Cafe/IOSU/legacy/iosu_mcp.cpp b/src/Cafe/IOSU/legacy/iosu_mcp.cpp
+index 94cd69c..30d7557 100644
+--- a/src/Cafe/IOSU/legacy/iosu_mcp.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_mcp.cpp
+@@ -20,7 +20,7 @@ namespace iosu
+ 		bool isInitialized;
+ 	}iosuMcp = { 0 };
+ 
+-	std::recursive_mutex sTitleInfoMutex;
++	CEMU_RECURSIVE_MUTEX sTitleInfoMutex;
+ 	constinit IOSUStaticData s_mcpStaticData;
+ 
+ 	bool sHasAllTitlesMounted = false;
+@@ -152,7 +152,7 @@ namespace iosu
+ 	{
+ 		if (iosuMcp.isInitialized)
+ 			return;
+-		std::thread t(iosuMcp_thread);
++		CEMU_THREAD t(iosuMcp_thread);
+ 		t.detach();
+ 		iosuMcp.isInitialized = true;
+ 	}
+@@ -161,7 +161,7 @@ namespace iosu
+ 	{
+ 		IOSMsgQueueId sMCPIoMsgQueue;
+ 		CafeStaticVar<iosu::kernel::IOSMessage, 352> _m_sMCPIoMsgQueueMsgBuffer{s_mcpStaticData};
+-		std::thread sMCPIoThread;
++		CEMU_THREAD sMCPIoThread;
+ 
+ 		struct MCPClient
+ 		{
+@@ -261,7 +261,7 @@ namespace iosu
+ 			IOS_ERROR r = IOS_RegisterResourceManager("/dev/mcp", sMCPIoMsgQueue);
+ 			IOS_DeviceAssociateId("/dev/mcp", 11);
+ 			cemu_assert(!IOS_ResultIsError(r));
+-			sMCPIoThread = std::thread(MCPIoThread);
++			sMCPIoThread = CEMU_THREAD(MCPIoThread);
+ 		}
+ 
+ 		void Shutdown()
+diff --git a/src/Cafe/IOSU/legacy/iosu_nim.cpp b/src/Cafe/IOSU/legacy/iosu_nim.cpp
+index dcafb45..01dc57e 100644
+--- a/src/Cafe/IOSU/legacy/iosu_nim.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_nim.cpp
+@@ -247,7 +247,7 @@ namespace iosu
+ 		{
+ 			while (iosuAct_isAccountDataLoaded() == false)
+ 			{
+-				std::this_thread::sleep_for(std::chrono::milliseconds(500));
++				CEMU_SLEEP_FOR(std::chrono::milliseconds(500));
+ 			}
+ 
+ 			if (nim_getLatestVersion())
+@@ -265,12 +265,12 @@ namespace iosu
+ 			if (g_nim.backgroundThreadStarted == false)
+ 			{
+ 				cemuLog_log(LogType::Force, "IOSU: Starting nim background thread");
+-				std::thread t(nim_backgroundThread);
++				CEMU_THREAD t(nim_backgroundThread);
+ 				t.detach();
+ 				g_nim.backgroundThreadStarted = true;
+ 			}
+ 			while (g_nim.packageListReady == false)
+-				std::this_thread::sleep_for(std::chrono::milliseconds(200));
++				CEMU_SLEEP_FOR(std::chrono::milliseconds(200));
+ 		}
+ 
+ 
+@@ -338,7 +338,7 @@ namespace iosu
+ 			g_nim.packages.clear();
+ 			g_nim.packageListReady = false;
+ 			g_nim.backgroundThreadStarted = false;
+-			std::thread t2(iosuNim_thread);
++			CEMU_THREAD t2(iosuNim_thread);
+ 			t2.detach();
+ 			g_nim.isInitialized = true;
+ 		}
+diff --git a/src/Cafe/IOSU/nn/iosu_nn_service.cpp b/src/Cafe/IOSU/nn/iosu_nn_service.cpp
+index 526da7f..82a01e0 100644
+--- a/src/Cafe/IOSU/nn/iosu_nn_service.cpp
++++ b/src/Cafe/IOSU/nn/iosu_nn_service.cpp
+@@ -15,8 +15,8 @@ namespace iosu
+ 				return;
+ 			m_threadInitialized = false;
+ 			m_requestStop = false;
+-			m_serviceThread = std::thread(&IPCSimpleService::ServiceThread, this);
+-			while (!m_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++			m_serviceThread = CEMU_THREAD(&IPCSimpleService::ServiceThread, this);
++			while (!m_threadInitialized) CEMU_YIELD();
+ 			StartService();
+ 		}
+ 
+@@ -140,8 +140,8 @@ namespace iosu
+ 				return;
+ 			m_threadInitialized = false;
+ 			m_requestStop = false;
+-			m_serviceThread = std::thread(&IPCService::ServiceThread, this);
+-			while (!m_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++			m_serviceThread = CEMU_THREAD(&IPCService::ServiceThread, this);
++			while (!m_threadInitialized) CEMU_YIELD();
+ 		}
+ 
+ 		void IPCService::Stop()
+diff --git a/src/Cafe/IOSU/nn/iosu_nn_service.h b/src/Cafe/IOSU/nn/iosu_nn_service.h
+index 48f66bb..2cc0700 100644
+--- a/src/Cafe/IOSU/nn/iosu_nn_service.h
++++ b/src/Cafe/IOSU/nn/iosu_nn_service.h
+@@ -66,7 +66,7 @@ namespace iosu
+ 			}
+ 
+ 			std::string m_devicePath;
+-			std::thread m_serviceThread;
++			CEMU_THREAD m_serviceThread;
+ 			std::atomic_bool m_requestStop{false};
+ 			std::atomic_bool m_isRunning{false};
+ 			std::atomic_bool m_threadInitialized{ false };
+@@ -349,7 +349,7 @@ namespace iosu
+ 			void ServiceThread();
+ 
+ 			std::string m_devicePath;
+-			std::thread m_serviceThread;
++			CEMU_THREAD m_serviceThread;
+ 			std::atomic_bool m_requestStop{false};
+ 			std::atomic_bool m_isRunning{false};
+ 			std::atomic_bool m_threadInitialized{ false };
+diff --git a/src/Cafe/OS/libs/TCL/TCL.cpp b/src/Cafe/OS/libs/TCL/TCL.cpp
+index d5ac311..1225800 100644
+--- a/src/Cafe/OS/libs/TCL/TCL.cpp
++++ b/src/Cafe/OS/libs/TCL/TCL.cpp
+@@ -74,6 +74,14 @@ namespace TCL
+ 	std::atomic<uint32> tclRingBufferA_writeIndex{0};
+ 
+ 	// GPU code calls this to grab the next command word
++#if defined(CHIMERA)
++	// chimera: is there a command for the GPU to read (what its wait asks)
++	bool TCLGPUHasRBWord()
++	{
++		return tclRingBufferA_readIndex.load(std::memory_order::relaxed) != tclRingBufferA_writeIndex.load(std::memory_order::acquire);
++	}
++#endif
++
+ 	bool TCLGPUReadRBWord(uint32& cmdWord)
+ 	{
+ 		uint32 readIndex = tclRingBufferA_readIndex.load(std::memory_order::relaxed);
+diff --git a/src/Cafe/OS/libs/TCL/TCL.h b/src/Cafe/OS/libs/TCL/TCL.h
+index b2be915..10a9357 100644
+--- a/src/Cafe/OS/libs/TCL/TCL.h
++++ b/src/Cafe/OS/libs/TCL/TCL.h
+@@ -20,6 +20,9 @@ namespace TCL
+ 
+ 	// called from Latte code
+ 	bool TCLGPUReadRBWord(uint32& cmdWord);
++#if defined(CHIMERA)
++	bool TCLGPUHasRBWord();
++#endif
+ 	void TCLGPUNotifyNewRetirementTimestamp();
+ 
+ 	COSModule* GetModule();
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Alarm.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Alarm.cpp
+index 568db97..875c14e 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Alarm.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Alarm.cpp
+@@ -21,6 +21,7 @@ namespace coreinit
+ 	public:
+ 		OSHostAlarm(uint64 nextFire, uint64 period, void(*callbackFunc)(uint64 currentTick, void* context), void* context) : m_nextFire(nextFire), m_period(period), m_callbackFunc(callbackFunc), m_context(context)
+ 		{
++			m_sequence = s_nextSequence++;
+ 			cemu_assert_debug(__OSHasSchedulerLock()); // must hold lock
+ 			auto r = g_activeAlarmList.emplace(this);
+ 			cemu_assert_debug(r.second); // check if insertion was successful
+@@ -116,6 +117,20 @@ namespace coreinit
+ 			return currentTick >= g_soonestAlarm;
+ 		}
+ 
++		static uint64 soonestAlarm()
++		{
++#if defined(CHIMERA)
++			// chimera: with no alarm at all the answer is "never". The value
++			// kept starts at 0 (so that the first check looks at the list),
++			// and the console's idle wait read that 0 as an alarm due at once:
++			// a program that went idle before it had made any alarm waited
++			// for nothing, again and again, and its clock never moved.
++			if (g_activeAlarmList.empty())
++				return std::numeric_limits<uint64>::max();
++#endif
++			return g_soonestAlarm;
++		}
++
+         static void Reset()
+         {
+             g_activeAlarmList.clear();
+@@ -130,13 +145,19 @@ namespace coreinit
+ 				auto p1Fire = p1->getNextFire();
+ 				auto p2Fire = p2->getNextFire();
+ 				if (p1Fire == p2Fire)
++#if defined(CHIMERA)
++					return p1->m_sequence < p2->m_sequence; // chimera: by age, the same in every run
++#else
+ 					return (uintptr_t)p1 < (uintptr_t)p2; // if time is equal, differ by pointer (to allow storing multiple alarms with same firing time)
++#endif
+ 				return p1Fire < p2Fire;
+ 			}
+ 		};
+ 
+ 	private:	
+ 		uint64 m_nextFire;
++		uint64 m_sequence;
++		inline static uint64 s_nextSequence = 0;
+ 		uint64 m_period; // if zero then repeat is disabled 
+ 		bool m_isActive{ false };
+ 
+@@ -162,6 +183,12 @@ namespace coreinit
+ 		delete hostAlarm;
+ 	}
+ 
++	// chimera: when the next alarm fires (OSGetTime's ticks), for the idle wait
++	uint64 alarm_getSoonestTick()
++	{
++		return OSHostAlarm::soonestAlarm();
++	}
++
+ 	void alarm_update()
+ 	{	
+ 		cemu_assert_debug(!__OSHasSchedulerLock());
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Alarm.h b/src/Cafe/OS/libs/coreinit/coreinit_Alarm.h
+index 06c1b23..9ab8fe6 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Alarm.h
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Alarm.h
+@@ -62,6 +62,7 @@ namespace coreinit
+ 	void OSAlarm_Shutdown();
+ 
+ 	void alarm_update();
++	uint64 alarm_getSoonestTick();
+ 
+ 	void MapAlarmExports();
+ 	void InitializeAlarm();
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_IPC.cpp b/src/Cafe/OS/libs/coreinit/coreinit_IPC.cpp
+index 3a470e2..f8412ab 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_IPC.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_IPC.cpp
+@@ -375,7 +375,7 @@ namespace coreinit
+ 		while (s_pendingOpenClose != 0 || s_activeReplyDeliveries != 0)
+ 		{
+ 			lock.unlock();
+-			std::this_thread::yield();
++			CEMU_YIELD();
+ 			lock.lock();
+ 		}
+ 		auto handles = s_openIOSHandles;
+@@ -386,7 +386,7 @@ namespace coreinit
+ 			IPCCommandBody closeBody{};
+ 			closeBody.cmdId = IPCCommandId::IOS_CLOSE;
+ 			closeBody.devHandle = handle;
+-			auto nextLogTime = std::chrono::steady_clock::now() + std::chrono::seconds(8);
++			auto nextLogTime = CEMU_STEADY_NOW() + std::chrono::seconds(8);
+ 			IOS_ERROR result;
+ 			do
+ 			{
+@@ -396,11 +396,11 @@ namespace coreinit
+ 				while (s_pendingOpenClose != 0)
+ 				{
+ 					lock.unlock();
+-					std::this_thread::yield();
+-					if (std::chrono::steady_clock::now() >= nextLogTime)
++					CEMU_YIELD();
++					if (CEMU_STEADY_NOW() >= nextLogTime)
+ 					{
+ 						cemuLog_log(LogType::Force, "IPC: Still waiting for shutdown Close on handle {}", handle);
+-						nextLogTime = std::chrono::steady_clock::now() + std::chrono::seconds(8);
++						nextLogTime = CEMU_STEADY_NOW() + std::chrono::seconds(8);
+ 					}
+ 					lock.lock();
+ 				}
+@@ -408,12 +408,12 @@ namespace coreinit
+ 				lock.unlock();
+ 				if (result == IOS_ERROR_WOULD_BLOCK)
+ 				{
+-					if (std::chrono::steady_clock::now() >= nextLogTime)
++					if (CEMU_STEADY_NOW() >= nextLogTime)
+ 					{
+ 						cemuLog_log(LogType::Force, "IPC: Still waiting to dispatch shutdown Close on handle {}", handle);
+-						nextLogTime = std::chrono::steady_clock::now() + std::chrono::seconds(8);
++						nextLogTime = CEMU_STEADY_NOW() + std::chrono::seconds(8);
+ 					}
+-					std::this_thread::yield();
++					CEMU_YIELD();
+ 				}
+ 			}
+ 			while (result == IOS_ERROR_WOULD_BLOCK);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
+index bae0dca..71a4103 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
+@@ -739,7 +739,7 @@ namespace coreinit
+ 			argArray.emplace_back(argv[i]);
+ 		CafeSystem::SetOverrideArgs(argArray);
+ 		// spawn launcher thread (this current thread will be destroyed during relaunch)
+-		std::thread launcherThread(OSLauncherThread, titleId);
++		CEMU_THREAD launcherThread(OSLauncherThread, titleId);
+ 		launcherThread.detach();
+ 		// suspend this thread
+ 		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
+@@ -860,7 +860,7 @@ namespace coreinit
+ 	void __PPCExit(sint32 status)
+ 	{
+ 		// spawn shutdown thread (the current thread has to be destroyed as part of the shutdown process)
+-		std::thread shutdownThread(OSShutdownThread, status);
++		CEMU_THREAD shutdownThread(OSShutdownThread, status);
+ 		shutdownThread.detach();
+ 		// suspend this thread
+ 		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
+index bb31077..3039901 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
+@@ -3,7 +3,11 @@
+ 
+ thread_local sint32 s_schedulerLockCount = 0;
+ 
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++// chimera: the tasks of one scheduler share a host thread
++#include "chimera_ppc.h"
++chimera::RecursiveMutex s_chimeraSchedulerLock;
++#elif BOOST_OS_WINDOWS
+ #include <synchapi.h>
+ CRITICAL_SECTION s_csSchedulerLock;
+ #else
+@@ -13,7 +17,9 @@ pthread_mutex_t s_ptmSchedulerLock;
+ 
+ void __OSLockScheduler(void* obj)
+ {
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	s_chimeraSchedulerLock.lock();
++#elif BOOST_OS_WINDOWS
+ 	EnterCriticalSection(&s_csSchedulerLock);
+ #else
+ 	pthread_mutex_lock(&s_ptmSchedulerLock);
+@@ -30,7 +36,9 @@ bool __OSHasSchedulerLock()
+ bool __OSTryLockScheduler(void* obj)
+ {
+ 	bool r;
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	r = s_chimeraSchedulerLock.try_lock();
++#elif BOOST_OS_WINDOWS
+ 	r = TryEnterCriticalSection(&s_csSchedulerLock);
+ #else
+ 	r = pthread_mutex_trylock(&s_ptmSchedulerLock) == 0;
+@@ -47,7 +55,9 @@ void __OSUnlockScheduler(void* obj)
+ {
+ 	s_schedulerLockCount--;
+ 	cemu_assert_debug(s_schedulerLockCount >= 0);
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	s_chimeraSchedulerLock.unlock();
++#elif BOOST_OS_WINDOWS
+ 	LeaveCriticalSection(&s_csSchedulerLock);
+ #else
+ 	pthread_mutex_unlock(&s_ptmSchedulerLock);
+@@ -77,7 +87,13 @@ namespace coreinit
+ 			// we have no efficient method to turn off scheduling completely, so instead we just increase the remaining cycles
+ 			if (hCPU->remainingCycles >= 0x40000000)
+ 				cemuLog_log(LogType::Force, "OSDisableInterrupts(): Warning - Interrupts already disabled but the mask was still set? remCycles {:08x} LR {:08x}", hCPU->remainingCycles, hCPU->spr.LR);
++#if defined(CHIMERA)
++			chimera_ppc_account(hCPU);
++#endif
+ 			hCPU->remainingCycles += 0x40000000;
++#if defined(CHIMERA)
++			chimera_ppc_mark(hCPU);
++#endif
+ 		}
+ 		hCPU->coreInterruptMask = 0;
+ 		return prevInterruptMask;
+@@ -91,7 +107,13 @@ namespace coreinit
+ 		uint32 prevInterruptMask = hCPU->coreInterruptMask;
+ 		if (hCPU->coreInterruptMask == 0 && interruptMask != 0)
+ 		{
++#if defined(CHIMERA)
++			chimera_ppc_account(hCPU);
++#endif
+ 			hCPU->remainingCycles -= 0x40000000;
++#if defined(CHIMERA)
++			chimera_ppc_mark(hCPU);
++#endif
+ 		}
+ 		hCPU->coreInterruptMask = interruptMask;
+ 		return prevInterruptMask;
+@@ -107,7 +129,8 @@ namespace coreinit
+ 
+ 	void InitializeSchedulerLock()
+ 	{
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++#elif BOOST_OS_WINDOWS
+ 		InitializeCriticalSection(&s_csSchedulerLock);
+ #else
+ 		pthread_mutexattr_t ma;
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+index 2346aa4..057cb39 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+@@ -8,6 +8,17 @@
+ #include "Cafe/OS/libs/snd_core/ax.h"
+ #include "Cafe/HW/Espresso/Debugger/GDBStub.h"
+ #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
++
++#if defined(CHIMERA)
++// chimera: memory mapped as a stack (waterbox/driver/cemu/fiber_chimera.cpp)
++namespace chimera
++{
++	void* StackMap(size_t size);
++	void StackUnmap(void* p, size_t size);
++	void StackRegister(const void* low, size_t size, const char* kind);
++	void StackUnregister(const void* low);
++}
++#endif
+ #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+ 
+ #include "util/helpers/Semaphore.h"
+@@ -16,6 +27,10 @@
+ 
+ #include "util/helpers/helpers.h"
+ 
++#if defined(CHIMERA)
++#include "chimera_ppc.h"
++#endif
++
+ #ifdef __arm64__
+ #if defined(__clang__)
+ #include <arm_acle.h>
+@@ -80,9 +95,30 @@ namespace coreinit
+ 	{
+ 		OSHostThread(OSThread_t* thread) : m_thread(thread), m_fiber((void(*)(void*))__OSFiberThreadEntry, this, this)
+ 		{
++#if defined(CHIMERA)
++			chimera::StackRegister(padding, sizeof(padding), "record"); // chimera: for the stack report
++#endif
+ 		}
+ 
++#if defined(CHIMERA)
++		~OSHostThread()
++		{
++			chimera::StackUnregister(padding);
++		}
++#else
+ 		~OSHostThread() = default;
++#endif
++
++#if defined(CHIMERA)
++		// chimera: while the recompiler runs the console's code, RSP holds the
++		// address of ppcInstance, so the padding below it is a stack: Windows
++		// writes an exception's context there. miniBox keeps memory read-only
++		// until it is written (to find the pages a state must save) except
++		// memory mapped as a stack; from the heap, the first fault in the
++		// recompiled code could not be delivered and the process died.
++		static void* operator new(size_t size) { return chimera::StackMap(size); }
++		static void operator delete(void* p, size_t size) { chimera::StackUnmap(p, size); }
++#endif
+ 
+ 		OSThread_t* m_thread;
+ 		Fiber m_fiber;
+@@ -1130,6 +1166,9 @@ namespace coreinit
+ 
+ 	void __OSStoreThread(OSThread_t* thread, PPCInterpreter_t* hCPU)
+ 	{
++#if defined(CHIMERA)
++		chimera_ppc_account(hCPU);
++#endif
+ 		if (thread->state == OSThread_t::THREAD_STATE::STATE_RUNNING)
+ 		{
+ 			thread->state = OSThread_t::THREAD_STATE::STATE_READY;
+@@ -1184,6 +1223,9 @@ namespace coreinit
+ 	{
+ 		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
+ 		// run one timeslice
++#if defined(CHIMERA)
++		chimera_ppc_account(hCPU);
++#endif
+ 		hCPU->remainingCycles = ppcThreadQuantum;
+ 		hCPU->skippedCycles = 0;
+ 		// we add a slight randomized variance to the thread quantum to avoid getting stuck in repeated code sequences where one or multiple threads always unload inside a lock
+@@ -1192,6 +1234,9 @@ namespace coreinit
+ 			s_lehmer_lcg[coreIndex] = 12345;
+ 		hCPU->remainingCycles += (s_lehmer_lcg[coreIndex] & 0x7F);
+ 		s_lehmer_lcg[coreIndex] = (uint32)((uint64)s_lehmer_lcg[coreIndex] * 279470273ull % 0xfffffffbull);
++#if defined(CHIMERA)
++		chimera_ppc_mark(hCPU);
++#endif
+ 	}
+ 
+ 	OSThread_t* __OSGetNextRunableThread(uint32 coreIndex)
+@@ -1270,6 +1315,11 @@ namespace coreinit
+ 				__OSCheckSystemEvents();
+ 				if(g_isMulticoreMode == false)
+ 					coreIndex = (coreIndex + 1) % 3;
++#if defined(CHIMERA)
++				// chimera: no thread is runnable on any core
++				if (g_isMulticoreMode == false && coreIndex == 0 && g_coreRunQueueThreadCount[0].isZero() && g_coreRunQueueThreadCount[1].isZero() && g_coreRunQueueThreadCount[2].isZero())
++					chimera_ppc_idle();
++#endif
+ 			}
+ 			else
+ 			{
+@@ -1368,6 +1418,9 @@ namespace coreinit
+ 			hCPU->reservedMemAddr = 0;
+ 			hCPU->reservedMemValue = 0;
+ 
++#if defined(CHIMERA)
++			chimera_ppc_safepoint();
++#endif
+ 			// reschedule
+ 			__OSLockScheduler();
+ 			__OSThreadSwitchToNext();
+@@ -1437,6 +1490,13 @@ namespace coreinit
+ 			return;
+ 		cemu_assert_debug(numCPUEmulationThreads == 1 || numCPUEmulationThreads == 3);
+ 		g_isMulticoreMode = numCPUEmulationThreads > 1;
++#if defined(CHIMERA)
++		// chimera: one core thread, and it is the task that called this
++		cemu_assert(numCPUEmulationThreads == 1);
++		_lock.unlock();
++		OSSchedulerCoreEmulationThread((void*)0);
++		return;
++#endif
+ 		if (numCPUEmulationThreads == 1)
+ 			sSchedulerThreads.emplace_back(OSSchedulerCoreEmulationThread, (void*)0);
+ 		else if (numCPUEmulationThreads == 3)
+diff --git a/src/Cafe/OS/libs/h264_avc/H264DecBackendAVC.cpp b/src/Cafe/OS/libs/h264_avc/H264DecBackendAVC.cpp
+index af00c8e..820c66c 100644
+--- a/src/Cafe/OS/libs/h264_avc/H264DecBackendAVC.cpp
++++ b/src/Cafe/OS/libs/h264_avc/H264DecBackendAVC.cpp
+@@ -49,7 +49,7 @@ namespace H264
+ 	  public:
+ 		H264AVCDecoder()
+ 		{
+-			m_decoderThread = std::thread(&H264AVCDecoder::DecoderThread, this);
++			m_decoderThread = CEMU_THREAD(&H264AVCDecoder::DecoderThread, this);
+ 		}
+ 
+ 		~H264AVCDecoder()
+@@ -512,7 +512,7 @@ namespace H264
+ 		uint32 m_numDecodedFrames{0};
+ 		std::vector<std::vector<uint8>> m_displayBuf;
+ 
+-		std::thread m_decoderThread;
++		CEMU_THREAD m_decoderThread;
+ 		std::atomic_bool m_threadShouldExit{false};
+ 	};
+ 
+diff --git a/src/Cafe/OS/libs/nfc/nfc.cpp b/src/Cafe/OS/libs/nfc/nfc.cpp
+index b625ca9..38f15a6 100644
+--- a/src/Cafe/OS/libs/nfc/nfc.cpp
++++ b/src/Cafe/OS/libs/nfc/nfc.cpp
+@@ -301,7 +301,7 @@ namespace nfc
+ 		}
+ 
+ 		// Did the timeout expire?
+-		if (ctx->discoveryTimeout < std::chrono::system_clock::now())
++		if (ctx->discoveryTimeout < CEMU_SYSTEM_NOW())
+ 		{
+ 			return true;
+ 		}
+@@ -339,7 +339,7 @@ namespace nfc
+ 			}
+ 
+ 			// Check if the tag should be removed again
+-			if (ctx->touchTime + std::chrono::seconds(2) < std::chrono::system_clock::now())
++			if (ctx->touchTime + std::chrono::seconds(2) < CEMU_SYSTEM_NOW())
+ 			{
+ 				ctx->nfcStatus &= ~NFC_STATUS_HAS_TAG;
+ 				ctx->tag = {};
+@@ -543,7 +543,7 @@ namespace nfc
+ 		}
+ 		else
+ 		{
+-			ctx->discoveryTimeout = std::chrono::system_clock::now() + std::chrono::milliseconds(discoveryTimeout);
++			ctx->discoveryTimeout = CEMU_SYSTEM_NOW() + std::chrono::milliseconds(discoveryTimeout);
+ 		}
+ 
+ 		return NFC_RESULT_SUCCESS;
+@@ -581,7 +581,7 @@ namespace nfc
+ 		}
+ 		else
+ 		{
+-			ctx->discoveryTimeout = std::chrono::system_clock::now() + std::chrono::milliseconds(discoveryTimeout);
++			ctx->discoveryTimeout = CEMU_SYSTEM_NOW() + std::chrono::milliseconds(discoveryTimeout);
+ 		}
+ 
+ 		memcpy(&ctx->filter.uid, uid, sizeof(*uid));
+@@ -632,7 +632,7 @@ namespace nfc
+ 		}
+ 		else
+ 		{
+-			ctx->discoveryTimeout = std::chrono::system_clock::now() + std::chrono::milliseconds(discoveryTimeout);
++			ctx->discoveryTimeout = CEMU_SYSTEM_NOW() + std::chrono::milliseconds(discoveryTimeout);
+ 		}
+ 
+ 		memcpy(&ctx->filter.uid, uid, sizeof(*uid));
+@@ -712,7 +712,7 @@ namespace nfc
+ 
+ 		ctx->nfcStatus |= NFC_STATUS_HAS_TAG;
+ 		ctx->tagPath = filePath;
+-		ctx->touchTime = std::chrono::system_clock::now();
++		ctx->touchTime = CEMU_SYSTEM_NOW();
+ 
+ 		*nfcError = NFC_TOUCH_TAG_ERROR_NONE;
+ 		return true;
+diff --git a/src/Cafe/OS/libs/nlibcurl/nlibcurl.cpp b/src/Cafe/OS/libs/nlibcurl/nlibcurl.cpp
+index 5ec652e..4fdb419 100644
+--- a/src/Cafe/OS/libs/nlibcurl/nlibcurl.cpp
++++ b/src/Cafe/OS/libs/nlibcurl/nlibcurl.cpp
+@@ -384,7 +384,7 @@ namespace nlibcurl
+ 	{
+ 		worker.ppcThread = coreinit::OSGetCurrentThread();
+ 		s_activeWorkerCount++;
+-		std::thread([&worker, job = std::move(job)]()
++		CEMU_THREAD([&worker, job = std::move(job)]()
+ 		{
+ 			t_curlWorker = &worker;
+ 			worker.result = job();
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_Common.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_Common.cpp
+index 839aa41..9c7d2e7 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_Common.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_Common.cpp
+@@ -1,285 +1,285 @@
+-#include "nn_olv_Common.h"
+-#include <zlib.h>
+-
+-namespace nn
+-{
+-	namespace olv
+-	{
+-
+-		sint32 olv_copy_wstr(char16_t* dest, const char16_t* src, uint32_t maxSize, uint32_t destSize)
+-		{
+-			size_t len = maxSize + 1;
+-			if (olv_wstrnlen(src, len) > maxSize)
+-				return OLV_RESULT_NOT_ENOUGH_SIZE;
+-
+-			memset(dest, 0, 2 * destSize);
+-			olv_wstrncpy(dest, src, len);
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		size_t olv_wstrnlen(const char16_t* str, size_t max_len)
+-		{
+-			size_t len = 0;
+-			while (len < max_len && str[len] != u'\0')
+-				len++;
+-
+-			return len;
+-		}
+-
+-		char16_t* olv_wstrncpy(char16_t* dest, const char16_t* src, size_t n)
+-		{
+-			char16_t* ret = dest;
+-			while (n > 0 && *src != u'\0')
+-			{
+-				*dest++ = *src++;
+-				n--;
+-			}
+-			while (n > 0)
+-			{
+-				*dest++ = u'\0';
+-				n--;
+-			}
+-			return ret;
+-		}
+-
+-		bool CheckTGA(const uint8* pTgaFile, uint32 pTgaFileLen, TGACheckType checkType)
+-		{
+-			const TGAHeader* header = (const TGAHeader*)pTgaFile;
+-			try
+-			{
+-				if (checkType == TGACheckType::CHECK_PAINTING)
+-				{
+-					if (
+-						header->idLength ||
+-						header->colorMapType ||
+-						header->imageType != 2 || // Uncompressed true color
+-						header->first_entry_idx ||
+-						header->colormap_length ||
+-						header->bpp ||
+-						header->x_origin ||
+-						header->y_origin ||
+-						header->width != 320 ||
+-						header->height != 120 ||
+-						header->pixel_depth_bpp != 32 ||
+-						header->image_desc_bits != 8
+-						)
+-					{
+-						throw std::runtime_error("TGACheckType::CHECK_PAINTING - Invalid TGA file!");
+-					}
+-				}
+-				else if (checkType == TGACheckType::CHECK_COMMUNITY_ICON)
+-				{
+-					if (header->width != 128 || header->height != 128 || header->pixel_depth_bpp != 32)
+-						throw std::runtime_error("TGACheckType::CHECK_COMMUNITY_ICON - Invalid TGA file -> width, height or bpp is wrong");
+-				}
+-				else if (checkType == TGACheckType::CHECK_100x100_200x200)
+-				{
+-					if (header->pixel_depth_bpp != 32)
+-						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> bpp is wrong");
+-
+-					if (header->width == 100)
+-					{
+-						if (header->height != 100)
+-							throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100");
+-					}
+-					else if (header->width != 200 || header->height != 200)
+-						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100 or 200x200");
+-				}
+-			}
+-			catch (const std::runtime_error& error)
+-			{
+-				// TGA Check Error! illegal format
+-				cemuLog_log(LogType::Force, error.what());
+-				return false;
+-			}
+-			return true;
+-		}
+-
+-		sint32 DecodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
+-		{
+-			uint32 decompressedSize = outSize;
+-			if (DecompressTGA(pOutBuffer, &decompressedSize, pInBuffer, inSize))
+-			{
+-				if (CheckTGA(pOutBuffer, decompressedSize, checkType))
+-					return decompressedSize;
+-				
+-				return -2;
+-			}
+-			else
+-			{
+-				cemuLog_log(LogType::Force, "OLIVE uncompress error.\n");
+-				return -1;
+-			}
+-		}
+-
+-		sint32 EncodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
+-		{
+-			if (inSize == outSize)
+-			{
+-				if (!CheckTGA(pInBuffer, inSize, checkType))
+-					return -1;
+-				
+-					uint32 compressedSize = outSize;
+-					if (CompressTGA(pOutBuffer, &compressedSize, pInBuffer, inSize))
+-						return compressedSize;
+-					else
+-					{
+-						cemuLog_log(LogType::Force, "OLIVE compress error.\n");
+-						return -1;
+-					}
+-			}
+-			else
+-			{
+-				cemuLog_log(LogType::Force, "compress buffer size check error. uSrcBufSize({}) != uDstBufSize({})\n", inSize, outSize);
+-				return -1;
+-			}
+-		}
+-
+-		bool DecompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
+-		{
+-			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
+-				return false;
+-
+-			uLongf bufferSize = *pOutSize;
+-			int result = uncompress(pOutBuffer, &bufferSize, pInBuffer, inSize);
+-
+-			if (result == Z_OK)
+-			{
+-				*pOutSize = static_cast<unsigned int>(bufferSize);
+-				return true;
+-			}
+-			else
+-			{
+-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown decompression error";
+-				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
+-				return false;
+-			}
+-		}
+-
+-		bool CompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
+-		{
+-			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
+-				return false;
+-
+-			uLongf bufferSize = *pOutSize;
+-			int result = compress(pOutBuffer, &bufferSize, pInBuffer, inSize);
+-
+-			if (result == Z_OK)
+-			{
+-				*pOutSize = static_cast<unsigned int>(bufferSize);
+-				return true;
+-			}
+-			else
+-			{
+-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown compression error";
+-				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
+-				return false;
+-			}
+-		}
+-
+-		constexpr uint32 CreateCommunityCodeById(uint32 communityId)
+-		{
+-			uint32 res = communityId ^ (communityId << 18) ^ (communityId << 24) ^ (communityId << 30);
+-			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 17) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 23) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 29) ^ 0x20121002;
+-		}
+-
+-		constexpr uint32 CreateCommunityIdByCode(uint32 code)
+-		{
+-			uint32 res = code ^ 0x20121002 ^ ((code ^ 0x20121002u) >> 17) ^ ((code ^ 0x20121002u) >> 23) ^ ((code ^ 0x20121002u) >> 29);
+-			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 18) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 24) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 30);
+-		}
+-
+-
+-		constexpr uint32 GetCommunityCodeTopByte(uint32 communityId)
+-		{
+-			uint8 code_byte3 = (uint8_t)(communityId >> 0x18);
+-			uint8 code_byte2 = (uint8_t)(communityId >> 0x10);
+-			uint8 code_byte1 = (uint8_t)(communityId >> 8);
+-			uint8 code_byte0 = (uint8_t)(communityId >> 0);
+-			return code_byte3 ^ code_byte2 ^ code_byte1 ^ code_byte0 ^ 0xff;
+-		}
+-
+-		constexpr uint64 GetRealCommunityCode(uint32_t communityId)
+-		{
+-			uint64 topByte = GetCommunityCodeTopByte(communityId);
+-			if ((0xe7 < topByte) && ((0xe8 < topByte || (0xd4a50fff < communityId))))
+-				return ((topByte << 32) | communityId) & 0x7fffffffff;
+-
+-			return ((topByte << 32) | communityId);
+-		}
+-
+-		void WriteCommunityCode(char* pOutCode, uint32 communityId)
+-		{
+-			uint32 code = CreateCommunityCodeById(communityId);
+-			uint64 communityCode = GetRealCommunityCode(code);
+-			sprintf(pOutCode, "%012llu", communityCode);
+-		}
+-
+-		bool EnsureCommunityCode(char* pCode)
+-		{
+-			uint64 code;
+-			if (sscanf(pCode, "%012llu", &code) > 0)
+-			{
+-				uint32 lowerCode = code;
+-				uint64 newCode = GetRealCommunityCode(code);
+-				return code == newCode;
+-			}
+-			return false;
+-		}
+-
+-		bool FormatCommunityCode(char* pOutCode, uint32* outLen, uint32 communityId)
+-		{
+-			bool result = false;
+-			if (communityId != -1)
+-			{
+-				if (communityId)
+-				{
+-					WriteCommunityCode(pOutCode, communityId);
+-					*outLen = strnlen(pOutCode, 12);
+-					if (EnsureCommunityCode(pOutCode))
+-						result = 1;
+-				}
+-			}
+-			return result;
+-		}
+-
+-		static_assert(GetRealCommunityCode(CreateCommunityCodeById(140500)) == 717651734336, "Wrong community code generation code, result must match.");
+-
+-		uint32 ExtractCommunityIdFromCode(char* pCode)
+-		{
+-			uint32 id = 0;
+-			uint64 code;
+-			if (sscanf(pCode, "%012llu", &code) > 0)
+-			{
+-				uint32 lower_code = code;
+-				id = CreateCommunityIdByCode(lower_code);
+-			}
+-			return id;
+-		}
+-
+-		bool GetCommunityIdFromCode(uint32* pOutId, const char* pCode)
+-		{
+-			if (!EnsureCommunityCode((char*)pCode))
+-				return false;
+-
+-			*pOutId = ExtractCommunityIdFromCode((char*)pCode);
+-			return true;
+-		}
+-
+-		sint32 olv_curlformcode_to_error(CURLFORMcode code)
+-		{
+-			switch (code)
+-			{
+-				case CURL_FORMADD_OK:
+-					return OLV_RESULT_SUCCESS;
+-
+-				case CURL_FORMADD_MEMORY:
+-					return OLV_RESULT_FATAL(25);
+-
+-				case CURL_FORMADD_OPTION_TWICE:
+-				default:
+-					return OLV_RESULT_LVL6(50);
+-			}
+-		}
+-	}
++#include "nn_olv_Common.h"
++#include <zlib.h>
++
++namespace nn
++{
++	namespace olv
++	{
++
++		sint32 olv_copy_wstr(char16_t* dest, const char16_t* src, uint32_t maxSize, uint32_t destSize)
++		{
++			size_t len = maxSize + 1;
++			if (olv_wstrnlen(src, len) > maxSize)
++				return OLV_RESULT_NOT_ENOUGH_SIZE;
++
++			memset(dest, 0, 2 * destSize);
++			olv_wstrncpy(dest, src, len);
++			return OLV_RESULT_SUCCESS;
++		}
++
++		size_t olv_wstrnlen(const char16_t* str, size_t max_len)
++		{
++			size_t len = 0;
++			while (len < max_len && str[len] != u'\0')
++				len++;
++
++			return len;
++		}
++
++		char16_t* olv_wstrncpy(char16_t* dest, const char16_t* src, size_t n)
++		{
++			char16_t* ret = dest;
++			while (n > 0 && *src != u'\0')
++			{
++				*dest++ = *src++;
++				n--;
++			}
++			while (n > 0)
++			{
++				*dest++ = u'\0';
++				n--;
++			}
++			return ret;
++		}
++
++		bool CheckTGA(const uint8* pTgaFile, uint32 pTgaFileLen, TGACheckType checkType)
++		{
++			const TGAHeader* header = (const TGAHeader*)pTgaFile;
++			try
++			{
++				if (checkType == TGACheckType::CHECK_PAINTING)
++				{
++					if (
++						header->idLength ||
++						header->colorMapType ||
++						header->imageType != 2 || // Uncompressed true color
++						header->first_entry_idx ||
++						header->colormap_length ||
++						header->bpp ||
++						header->x_origin ||
++						header->y_origin ||
++						header->width != 320 ||
++						header->height != 120 ||
++						header->pixel_depth_bpp != 32 ||
++						header->image_desc_bits != 8
++						)
++					{
++						throw std::runtime_error("TGACheckType::CHECK_PAINTING - Invalid TGA file!");
++					}
++				}
++				else if (checkType == TGACheckType::CHECK_COMMUNITY_ICON)
++				{
++					if (header->width != 128 || header->height != 128 || header->pixel_depth_bpp != 32)
++						throw std::runtime_error("TGACheckType::CHECK_COMMUNITY_ICON - Invalid TGA file -> width, height or bpp is wrong");
++				}
++				else if (checkType == TGACheckType::CHECK_100x100_200x200)
++				{
++					if (header->pixel_depth_bpp != 32)
++						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> bpp is wrong");
++
++					if (header->width == 100)
++					{
++						if (header->height != 100)
++							throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100");
++					}
++					else if (header->width != 200 || header->height != 200)
++						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100 or 200x200");
++				}
++			}
++			catch (const std::runtime_error& error)
++			{
++				// TGA Check Error! illegal format
++				cemuLog_log(LogType::Force, error.what());
++				return false;
++			}
++			return true;
++		}
++
++		sint32 DecodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
++		{
++			uint32 decompressedSize = outSize;
++			if (DecompressTGA(pOutBuffer, &decompressedSize, pInBuffer, inSize))
++			{
++				if (CheckTGA(pOutBuffer, decompressedSize, checkType))
++					return decompressedSize;
++				
++				return -2;
++			}
++			else
++			{
++				cemuLog_log(LogType::Force, "OLIVE uncompress error.\n");
++				return -1;
++			}
++		}
++
++		sint32 EncodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
++		{
++			if (inSize == outSize)
++			{
++				if (!CheckTGA(pInBuffer, inSize, checkType))
++					return -1;
++				
++					uint32 compressedSize = outSize;
++					if (CompressTGA(pOutBuffer, &compressedSize, pInBuffer, inSize))
++						return compressedSize;
++					else
++					{
++						cemuLog_log(LogType::Force, "OLIVE compress error.\n");
++						return -1;
++					}
++			}
++			else
++			{
++				cemuLog_log(LogType::Force, "compress buffer size check error. uSrcBufSize({}) != uDstBufSize({})\n", inSize, outSize);
++				return -1;
++			}
++		}
++
++		bool DecompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
++		{
++			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
++				return false;
++
++			uLongf bufferSize = *pOutSize;
++			int result = uncompress(pOutBuffer, &bufferSize, pInBuffer, inSize);
++
++			if (result == Z_OK)
++			{
++				*pOutSize = static_cast<unsigned int>(bufferSize);
++				return true;
++			}
++			else
++			{
++				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown decompression error";
++				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
++				return false;
++			}
++		}
++
++		bool CompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
++		{
++			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
++				return false;
++
++			uLongf bufferSize = *pOutSize;
++			int result = compress(pOutBuffer, &bufferSize, pInBuffer, inSize);
++
++			if (result == Z_OK)
++			{
++				*pOutSize = static_cast<unsigned int>(bufferSize);
++				return true;
++			}
++			else
++			{
++				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown compression error";
++				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
++				return false;
++			}
++		}
++
++		constexpr uint32 CreateCommunityCodeById(uint32 communityId)
++		{
++			uint32 res = communityId ^ (communityId << 18) ^ (communityId << 24) ^ (communityId << 30);
++			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 17) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 23) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 29) ^ 0x20121002;
++		}
++
++		constexpr uint32 CreateCommunityIdByCode(uint32 code)
++		{
++			uint32 res = code ^ 0x20121002 ^ ((code ^ 0x20121002u) >> 17) ^ ((code ^ 0x20121002u) >> 23) ^ ((code ^ 0x20121002u) >> 29);
++			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 18) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 24) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 30);
++		}
++
++
++		constexpr uint32 GetCommunityCodeTopByte(uint32 communityId)
++		{
++			uint8 code_byte3 = (uint8_t)(communityId >> 0x18);
++			uint8 code_byte2 = (uint8_t)(communityId >> 0x10);
++			uint8 code_byte1 = (uint8_t)(communityId >> 8);
++			uint8 code_byte0 = (uint8_t)(communityId >> 0);
++			return code_byte3 ^ code_byte2 ^ code_byte1 ^ code_byte0 ^ 0xff;
++		}
++
++		constexpr uint64 GetRealCommunityCode(uint32_t communityId)
++		{
++			uint64 topByte = GetCommunityCodeTopByte(communityId);
++			if ((0xe7 < topByte) && ((0xe8 < topByte || (0xd4a50fff < communityId))))
++				return ((topByte << 32) | communityId) & 0x7fffffffff;
++
++			return ((topByte << 32) | communityId);
++		}
++
++		void WriteCommunityCode(char* pOutCode, uint32 communityId)
++		{
++			uint32 code = CreateCommunityCodeById(communityId);
++			uint64 communityCode = GetRealCommunityCode(code);
++			sprintf(pOutCode, "%012llu", communityCode);
++		}
++
++		bool EnsureCommunityCode(char* pCode)
++		{
++			uint64 code;
++			if (sscanf(pCode, "%012llu", &code) > 0)
++			{
++				uint32 lowerCode = code;
++				uint64 newCode = GetRealCommunityCode(code);
++				return code == newCode;
++			}
++			return false;
++		}
++
++		bool FormatCommunityCode(char* pOutCode, uint32* outLen, uint32 communityId)
++		{
++			bool result = false;
++			if (communityId != -1)
++			{
++				if (communityId)
++				{
++					WriteCommunityCode(pOutCode, communityId);
++					*outLen = strnlen(pOutCode, 12);
++					if (EnsureCommunityCode(pOutCode))
++						result = 1;
++				}
++			}
++			return result;
++		}
++
++		static_assert(GetRealCommunityCode(CreateCommunityCodeById(140500)) == 717651734336, "Wrong community code generation code, result must match.");
++
++		uint32 ExtractCommunityIdFromCode(char* pCode)
++		{
++			uint32 id = 0;
++			uint64 code;
++			if (sscanf(pCode, "%012llu", &code) > 0)
++			{
++				uint32 lower_code = code;
++				id = CreateCommunityIdByCode(lower_code);
++			}
++			return id;
++		}
++
++		bool GetCommunityIdFromCode(uint32* pOutId, const char* pCode)
++		{
++			if (!EnsureCommunityCode((char*)pCode))
++				return false;
++
++			*pOutId = ExtractCommunityIdFromCode((char*)pCode);
++			return true;
++		}
++
++		sint32 olv_curlformcode_to_error(CURLFORMcode code)
++		{
++			switch (code)
++			{
++				case CURL_FORMADD_OK:
++					return OLV_RESULT_SUCCESS;
++
++				case CURL_FORMADD_MEMORY:
++					return OLV_RESULT_FATAL(25);
++
++				case CURL_FORMADD_OPTION_TWICE:
++				default:
++					return OLV_RESULT_LVL6(50);
++			}
++		}
++	}
+ }
+\ No newline at end of file
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.cpp
+index f9da4d4..005e00f 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.cpp
+@@ -1,234 +1,234 @@
+-#include "nn_olv_DownloadCommunityTypes.h"
+-
+-namespace nn
+-{
+-	namespace olv
+-	{
+-
+-		sint32 DownloadCommunityDataList_AsyncRequestImpl(
+-			CurlRequestHelper& req, const char* reqUrl,
+-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam);
+-
+-
+-		sint32 DownloadCommunityDataList_AsyncRequest(
+-			CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
+-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
+-		)
+-		{
+-			sint32 res = DownloadCommunityDataList_AsyncRequestImpl(req, reqUrl, pOutList, pOutNum, numMaxList, pParam);
+-			coreinit::OSSignalEvent(requestDoneEvent);
+-			return res;
+-		}
+-
+-		sint32 DownloadCommunityDataList(DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam)
+-		{
+-			if (!g_IsInitialized)
+-				return OLV_RESULT_NOT_INITIALIZED;
+-
+-			if (!g_IsOnlineMode)
+-				return OLV_RESULT_OFFLINE_MODE_REQUEST;
+-
+-			if (!pOutList || !pOutNum || !pParam)
+-				return OLV_RESULT_INVALID_PTR;
+-
+-			if (!numMaxList)
+-				return OLV_RESULT_NOT_ENOUGH_SIZE;
+-
+-			for (int i = 0; i < numMaxList; i++)
+-				DownloadedCommunityData::Clean(&pOutList[i]);
+-
+-			char reqUrl[2048];
+-			sint32 res = pParam->GetRawDataUrl(reqUrl, sizeof(reqUrl));
+-			if (res < 0)
+-				return res;
+-
+-			CurlRequestHelper req;
+-			req.initate(ActiveSettings::GetNetworkService(), reqUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
+-			InitializeOliveRequest(req);
+-
+-			StackAllocator<coreinit::OSEvent> requestDoneEvent;
+-			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			std::future<sint32> requestRes = std::async(std::launch::async, DownloadCommunityDataList_AsyncRequest,
+-				std::ref(req), reqUrl, requestDoneEvent.GetPointer(), pOutList, pOutNum, numMaxList, pParam);
+-			coreinit::OSWaitEvent(&requestDoneEvent);
+-
+-			return requestRes.get();	
+-		}
+-
+-		sint32 DownloadCommunityDataList_AsyncRequestImpl(
+-			CurlRequestHelper& req, const char* reqUrl,
+-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
+-		)
+-		{
+-
+-			bool reqResult = req.submitRequest();
+-			long httpCode = 0;
+-			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
+-
+-
+-			if (!reqResult)
+-			{
+-				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
+-				if (!(httpCode >= 400))
+-					return OLV_RESULT_FAILED_REQUEST;
+-			}
+-
+-			pugi::xml_document doc;
+-			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
+-			{
+-				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community download response"));
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			sint32 responseError = CheckOliveResponse(doc);
+-			if (responseError < 0)
+-				return responseError;
+-
+-			if (httpCode != 200)
+-				return OLV_RESULT_STATUS(httpCode + 4000);
+-
+-			std::string request_name = doc.select_node("//request_name").node().child_value();
+-			if (request_name.size() == 0)
+-			{
+-				cemuLog_log(LogType::Force, "Community download response doesn't contain <request_name>");
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			if ((request_name.compare("communities") != 0) && (request_name.compare("specified_communities") != 0))
+-			{
+-				cemuLog_log(LogType::Force, "Community download response <request_name> isn't \"communities\" or \"specified_communities\"");
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			pugi::xml_node communities = doc.select_node("//communities").node();
+-			if (!communities)
+-			{
+-				cemuLog_log(LogType::Force, "Community download response doesn't contain <communities>");
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			int idx = 0;
+-			for (pugi::xml_node communityNode : communities.children("community"))
+-			{
+-				if (idx >= numMaxList)
+-					break;
+-
+-				DownloadedCommunityData* pOutData = &pOutList[idx];
+-
+-				std::string_view app_data = communityNode.child_value("app_data");
+-				std::string_view community_id = communityNode.child_value("community_id");
+-				std::string_view name = communityNode.child_value("name");
+-				std::string_view description = communityNode.child_value("description");
+-				std::string_view pid = communityNode.child_value("pid");
+-				std::string_view icon = communityNode.child_value("icon");
+-				std::string_view mii = communityNode.child_value("mii");
+-				std::string_view screen_name = communityNode.child_value("screen_name");
+-
+-				if (app_data.size() != 0)
+-				{
+-					auto app_data_bin = NCrypto::base64Decode(app_data);
+-					if (app_data_bin.size() != 0)
+-					{
+-						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
+-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_APP_DATA;
+-						pOutData->appDataLen = app_data_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
+-				if (community_id_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->communityId = community_id_val;
+-
+-				if (name.size() != 0)
+-				{
+-					auto name_utf16 = StringHelpers::FromUtf8(name);
+-					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
+-					if (name_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < name_utf16.size(); i++)
+-							pOutData->titleText[i] = name_utf16.at(i).bevalue();
+-
+-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_TITLE_TEXT;
+-						pOutData->titleTextMaxLen = name_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				if (description.size() != 0)
+-				{
+-					auto description_utf16 = StringHelpers::FromUtf8(description);
+-					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
+-					if (description_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < description_utf16.size(); i++)
+-							pOutData->description[i] = description_utf16.at(i).bevalue();
+-
+-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_DESC_TEXT;
+-						pOutData->descriptionMaxLen = description_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
+-				if (pid_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->pid = pid_val;
+-
+-				if (icon.size() != 0)
+-				{
+-					auto icon_bin = NCrypto::base64Decode(icon);
+-					if (icon_bin.size() != 0)
+-					{
+-						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
+-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_ICON_DATA;
+-						pOutData->iconDataSize = icon_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				if (mii.size() != 0)
+-				{
+-					auto mii_bin = NCrypto::base64Decode(mii);
+-					if (mii_bin.size() != 0)
+-					{
+-						memcpy(pOutData->miiFFLStoreData, mii_bin.data(), std::min(size_t(96), mii_bin.size()));
+-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_MII_DATA;
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				if (screen_name.size() != 0)
+-				{
+-					auto screen_name_utf16 = StringHelpers::FromUtf8(screen_name);
+-					screen_name_utf16.resize(std::min<size_t>(screen_name_utf16.size(), 32));
+-					if (screen_name_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < screen_name_utf16.size(); i++)
+-							pOutData->miiDisplayName[i] = screen_name_utf16.at(i).bevalue();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				idx++;
+-
+-			}
+-
+-			*pOutNum = _swapEndianU32(idx);
+-			sint32 res = OLV_RESULT_SUCCESS;
+-			if (idx > 0)
+-				res = 0; // nn_olv doesn't do it like that, but it's the same effect. I have no clue why it returns 0 when you have 1+ communities downloaded
+-
+-			return res;
+-		}
+-	}
+-}
++#include "nn_olv_DownloadCommunityTypes.h"
++
++namespace nn
++{
++	namespace olv
++	{
++
++		sint32 DownloadCommunityDataList_AsyncRequestImpl(
++			CurlRequestHelper& req, const char* reqUrl,
++			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam);
++
++
++		sint32 DownloadCommunityDataList_AsyncRequest(
++			CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
++			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
++		)
++		{
++			sint32 res = DownloadCommunityDataList_AsyncRequestImpl(req, reqUrl, pOutList, pOutNum, numMaxList, pParam);
++			coreinit::OSSignalEvent(requestDoneEvent);
++			return res;
++		}
++
++		sint32 DownloadCommunityDataList(DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam)
++		{
++			if (!g_IsInitialized)
++				return OLV_RESULT_NOT_INITIALIZED;
++
++			if (!g_IsOnlineMode)
++				return OLV_RESULT_OFFLINE_MODE_REQUEST;
++
++			if (!pOutList || !pOutNum || !pParam)
++				return OLV_RESULT_INVALID_PTR;
++
++			if (!numMaxList)
++				return OLV_RESULT_NOT_ENOUGH_SIZE;
++
++			for (int i = 0; i < numMaxList; i++)
++				DownloadedCommunityData::Clean(&pOutList[i]);
++
++			char reqUrl[2048];
++			sint32 res = pParam->GetRawDataUrl(reqUrl, sizeof(reqUrl));
++			if (res < 0)
++				return res;
++
++			CurlRequestHelper req;
++			req.initate(ActiveSettings::GetNetworkService(), reqUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
++			InitializeOliveRequest(req);
++
++			StackAllocator<coreinit::OSEvent> requestDoneEvent;
++			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
++			std::future<sint32> requestRes = CEMU_ASYNC(DownloadCommunityDataList_AsyncRequest,
++				std::ref(req), reqUrl, requestDoneEvent.GetPointer(), pOutList, pOutNum, numMaxList, pParam);
++			coreinit::OSWaitEvent(&requestDoneEvent);
++
++			return requestRes.get();	
++		}
++
++		sint32 DownloadCommunityDataList_AsyncRequestImpl(
++			CurlRequestHelper& req, const char* reqUrl,
++			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
++		)
++		{
++
++			bool reqResult = req.submitRequest();
++			long httpCode = 0;
++			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
++
++
++			if (!reqResult)
++			{
++				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
++				if (!(httpCode >= 400))
++					return OLV_RESULT_FAILED_REQUEST;
++			}
++
++			pugi::xml_document doc;
++			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
++			{
++				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community download response"));
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			sint32 responseError = CheckOliveResponse(doc);
++			if (responseError < 0)
++				return responseError;
++
++			if (httpCode != 200)
++				return OLV_RESULT_STATUS(httpCode + 4000);
++
++			std::string request_name = doc.select_node("//request_name").node().child_value();
++			if (request_name.size() == 0)
++			{
++				cemuLog_log(LogType::Force, "Community download response doesn't contain <request_name>");
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			if ((request_name.compare("communities") != 0) && (request_name.compare("specified_communities") != 0))
++			{
++				cemuLog_log(LogType::Force, "Community download response <request_name> isn't \"communities\" or \"specified_communities\"");
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			pugi::xml_node communities = doc.select_node("//communities").node();
++			if (!communities)
++			{
++				cemuLog_log(LogType::Force, "Community download response doesn't contain <communities>");
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			int idx = 0;
++			for (pugi::xml_node communityNode : communities.children("community"))
++			{
++				if (idx >= numMaxList)
++					break;
++
++				DownloadedCommunityData* pOutData = &pOutList[idx];
++
++				std::string_view app_data = communityNode.child_value("app_data");
++				std::string_view community_id = communityNode.child_value("community_id");
++				std::string_view name = communityNode.child_value("name");
++				std::string_view description = communityNode.child_value("description");
++				std::string_view pid = communityNode.child_value("pid");
++				std::string_view icon = communityNode.child_value("icon");
++				std::string_view mii = communityNode.child_value("mii");
++				std::string_view screen_name = communityNode.child_value("screen_name");
++
++				if (app_data.size() != 0)
++				{
++					auto app_data_bin = NCrypto::base64Decode(app_data);
++					if (app_data_bin.size() != 0)
++					{
++						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
++						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_APP_DATA;
++						pOutData->appDataLen = app_data_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
++				if (community_id_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->communityId = community_id_val;
++
++				if (name.size() != 0)
++				{
++					auto name_utf16 = StringHelpers::FromUtf8(name);
++					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
++					if (name_utf16.size() != 0)
++					{
++						for (int i = 0; i < name_utf16.size(); i++)
++							pOutData->titleText[i] = name_utf16.at(i).bevalue();
++
++						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_TITLE_TEXT;
++						pOutData->titleTextMaxLen = name_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				if (description.size() != 0)
++				{
++					auto description_utf16 = StringHelpers::FromUtf8(description);
++					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
++					if (description_utf16.size() != 0)
++					{
++						for (int i = 0; i < description_utf16.size(); i++)
++							pOutData->description[i] = description_utf16.at(i).bevalue();
++
++						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_DESC_TEXT;
++						pOutData->descriptionMaxLen = description_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
++				if (pid_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->pid = pid_val;
++
++				if (icon.size() != 0)
++				{
++					auto icon_bin = NCrypto::base64Decode(icon);
++					if (icon_bin.size() != 0)
++					{
++						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
++						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_ICON_DATA;
++						pOutData->iconDataSize = icon_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				if (mii.size() != 0)
++				{
++					auto mii_bin = NCrypto::base64Decode(mii);
++					if (mii_bin.size() != 0)
++					{
++						memcpy(pOutData->miiFFLStoreData, mii_bin.data(), std::min(size_t(96), mii_bin.size()));
++						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_MII_DATA;
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				if (screen_name.size() != 0)
++				{
++					auto screen_name_utf16 = StringHelpers::FromUtf8(screen_name);
++					screen_name_utf16.resize(std::min<size_t>(screen_name_utf16.size(), 32));
++					if (screen_name_utf16.size() != 0)
++					{
++						for (int i = 0; i < screen_name_utf16.size(); i++)
++							pOutData->miiDisplayName[i] = screen_name_utf16.at(i).bevalue();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				idx++;
++
++			}
++
++			*pOutNum = _swapEndianU32(idx);
++			sint32 res = OLV_RESULT_SUCCESS;
++			if (idx > 0)
++				res = 0; // nn_olv doesn't do it like that, but it's the same effect. I have no clue why it returns 0 when you have 1+ communities downloaded
++
++			return res;
++		}
++	}
++}
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_InitializeTypes.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_InitializeTypes.cpp
+index bce4de8..467ebf8 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_InitializeTypes.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_InitializeTypes.cpp
+@@ -1,313 +1,313 @@
+-#include "nn_olv_InitializeTypes.h"
+-#include "CafeSystem.h"
+-#include "Cafe/OS/libs/nn_act/nn_act.h"
+-#include <time.h>
+-
+-namespace nn
+-{
+-	namespace olv
+-	{
+-		uint32_t g_ReportTypes = 0;
+-		bool g_IsOnlineMode = false;
+-		bool g_IsInitialized = false;
+-		bool g_IsOfflineDBMode = false;
+-		ParamPackStorage g_ParamPack;
+-		DiscoveryResultStorage g_DiscoveryResults;
+-
+-		sint32 GetOlvAccessKey(uint32* pOutKey)
+-		{
+-			*pOutKey = 0;
+-			uint32 accessKey = CafeSystem::GetForegroundTitleOlvAccesskey();
+-			if (accessKey == -1)
+-				return OLV_RESULT_STATUS(1102);
+-
+-			*pOutKey = accessKey;
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		sint32 CreateParamPack(uint64_t titleId, uint32_t accessKey)
+-		{
+-			g_ParamPack.languageId = uint8(GetConfig().console_language.GetValue());
+-
+-			uint32be simpleAddress = 0;
+-			nn::act::GetSimpleAddressIdEx(&simpleAddress, nn::act::ACT_SLOT_CURRENT);
+-			uint32 countryCode = nn::act::getCountryCodeFromSimpleAddress(simpleAddress);
+-
+-			g_ParamPack.countryId = countryCode;
+-			g_ParamPack.titleId = titleId;
+-			g_ParamPack.platformId = 1;
+-
+-			g_ParamPack.areaId = (simpleAddress >> 8) & 0xff;
+-
+-			MCPHANDLE handle = MCP_Open();
+-			SysProdSettings sysProdSettings;
+-			MCP_GetSysProdSettings(handle, &sysProdSettings);
+-			MCP_Close(handle);
+-
+-			g_ParamPack.regionId = sysProdSettings.platformRegion;
+-			g_ParamPack.accessKey = accessKey;
+-
+-			g_ParamPack.networkRestriction = 0;
+-			g_ParamPack.friendRestriction = 0;
+-			g_ParamPack.ratingRestriction = 18;
+-			g_ParamPack.ratingOrganization = 4; // PEGI ?
+-
+-			uint64 transferrableId;
+-			nn::act::GetTransferableIdEx(&transferrableId, (titleId >> 8) & 0xFFFFF, nn::act::ACT_SLOT_CURRENT);
+-			g_ParamPack.transferableId = transferrableId;
+-
+-			strcpy(g_ParamPack.tzName, "CEMU/Olive"); // Should be nn::act::GetTimeZoneId
+-			g_ParamPack.utcOffset = (uint64_t)nn::act::GetUtcOffset() / 1'000'000;
+-
+-			char paramPackStr[1024];
+-			snprintf(
+-				paramPackStr,
+-				sizeof(paramPackStr),
+-				"\\%s\\%llu\\%s\\%u\\%s\\%u\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%u\\%s\\%d\\%s\\%llu\\"
+-				"%s\\%s\\%s\\%lld\\",
+-				"title_id",
+-				g_ParamPack.titleId,
+-				"access_key",
+-				g_ParamPack.accessKey,
+-				"platform_id",
+-				g_ParamPack.platformId,
+-				"region_id",
+-				g_ParamPack.regionId,
+-				"language_id",
+-				g_ParamPack.languageId,
+-				"country_id",
+-				g_ParamPack.countryId,
+-				"area_id",
+-				g_ParamPack.areaId,
+-				"network_restriction",
+-				g_ParamPack.networkRestriction,
+-				"friend_restriction",
+-				g_ParamPack.friendRestriction,
+-				"rating_restriction",
+-				g_ParamPack.ratingRestriction,
+-				"rating_organization",
+-				g_ParamPack.ratingOrganization,
+-				"transferable_id",
+-				g_ParamPack.transferableId,
+-				"tz_name",
+-				g_ParamPack.tzName,
+-				"utc_offset",
+-				g_ParamPack.utcOffset);
+-			std::string encodedParamPack = NCrypto::base64Encode(paramPackStr, strnlen(paramPackStr, 1024));
+-			memset(&g_ParamPack.encodedParamPack, 0, sizeof(g_ParamPack.encodedParamPack));
+-			memcpy(&g_ParamPack.encodedParamPack, encodedParamPack.data(), encodedParamPack.size());
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		sint32 MakeDiscoveryRequest_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl)
+-		{
+-			bool reqResult = req.submitRequest();
+-			long httpCode = 0;
+-			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
+-			if (!reqResult)
+-			{
+-				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
+-				if (!(httpCode >= 400))
+-					return OLV_RESULT_FAILED_REQUEST;
+-			}
+-
+-			pugi::xml_document doc;
+-			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
+-			{
+-				cemuLog_log(LogType::Force, fmt::format("Invalid XML in discovery service response"));
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			sint32 responseError = CheckOliveResponse(doc);
+-			if (responseError < 0)
+-				return responseError;
+-
+-			if (httpCode != 200)
+-				return OLV_RESULT_STATUS(httpCode + 4000);
+-
+-
+-			/*
+-				<result>
+-					<has_error>0</has_error>
+-					<version>1</version>
+-					<endpoint>
+-						<host>api.olv.pretendo.cc</host>
+-						<api_host>api.olv.pretendo.cc</api_host>
+-						<portal_host>portal.olv.pretendo.cc</portal_host>
+-						<n3ds_host>ctr.olv.pretendo.cc</n3ds_host>
+-					</endpoint>
+-				</result>
+-			*/
+-
+-			pugi::xml_node resultNode = doc.child("result");
+-			if (!resultNode)
+-			{
+-				cemuLog_log(LogType::Force, "Discovery response doesn't contain <result>");
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			pugi::xml_node endpointNode = resultNode.child("endpoint");
+-			if (!endpointNode)
+-			{
+-				cemuLog_log(LogType::Force, "Discovery response doesn't contain <result><endpoint>");
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			// Yes it only uses <host> and <portal_host>
+-			std::string_view host = endpointNode.child_value("host");
+-			std::string_view portal_host = endpointNode.child_value("portal_host");
+-
+-			snprintf(g_DiscoveryResults.apiEndpoint, sizeof(g_DiscoveryResults.apiEndpoint), "https://%s", host.data());
+-			snprintf(g_DiscoveryResults.portalEndpoint, sizeof(g_DiscoveryResults.portalEndpoint), "https://%s", portal_host.data());
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		sint32 MakeDiscoveryRequest_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent)
+-		{
+-			sint32 res = MakeDiscoveryRequest_AsyncRequestImpl(req, reqUrl);
+-			coreinit::OSSignalEvent(requestDoneEvent);
+-			return res;
+-		}
+-
+-		sint32 MakeDiscoveryRequest()
+-		{
+-			// =============================================================================
+-			// Discovery request | https://discovery.olv.nintendo.net/v1/endpoint
+-			// =============================================================================
+-
+-			CurlRequestHelper req;
+-			std::string requestUrl;
+-			switch (ActiveSettings::GetNetworkService())
+-			{
+-				case NetworkService::Pretendo:
+-					requestUrl = PretendoURLs::OLVURL;
+-					break;
+-				case NetworkService::Custom:
+-					requestUrl = GetNetworkConfig().urls.OLV.GetValue();
+-					break;
+-				case NetworkService::Nintendo:
+-				default:
+-					requestUrl = NintendoURLs::OLVURL;
+-					break;
+-			}
+-
+-			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
+-			InitializeOliveRequest(req);
+-
+-			StackAllocator<coreinit::OSEvent> requestDoneEvent;
+-			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			std::future<sint32> requestRes = std::async(std::launch::async, MakeDiscoveryRequest_AsyncRequest, std::ref(req), requestUrl.c_str(), requestDoneEvent.GetPointer());
+-			coreinit::OSWaitEvent(&requestDoneEvent);
+-
+-			return requestRes.get();
+-		}
+-
+-		sint32 Initialize(nn::olv::InitializeParam* pParam)
+-		{
+-			if (g_IsInitialized)
+-				return OLV_RESULT_ALREADY_INITIALIZED;
+-
+-			if (!pParam->m_Work)
+-			{
+-				g_IsInitialized = false;
+-				return OLV_RESULT_INVALID_PTR;
+-			}
+-
+-			if (pParam->m_WorkSize < 0x10000)
+-			{
+-				g_IsInitialized = false;
+-				return OLV_RESULT_INVALID_SIZE;
+-			}
+-
+-			uint32_t accessKey;
+-			int32_t olvAccessKeyStatus = GetOlvAccessKey(&accessKey);
+-			if (olvAccessKeyStatus < 0)
+-			{
+-				g_IsInitialized = false;
+-				return olvAccessKeyStatus;
+-			}
+-
+-			uint64_t tid = CafeSystem::GetForegroundTitleId();
+-			int32_t createParamPackResult = CreateParamPack(tid, accessKey);
+-			if (createParamPackResult < 0)
+-			{
+-				g_IsInitialized = false;
+-				return createParamPackResult;
+-			}
+-
+-			g_IsInitialized = true;
+-
+-			if(ActiveSettings::GetNetworkService() == NetworkService::Nintendo)
+-			{
+-				// since the official Miiverse was shut down, use local post archive instead
+-				g_IsOnlineMode = true;
+-				g_IsOfflineDBMode = true;
+-				return OLV_RESULT_SUCCESS;
+-			}
+-			if ((pParam->m_Flags & InitializeParam::FLAG_OFFLINE_MODE) == 0)
+-			{
+-				g_IsOnlineMode = true;
+-
+-				independentServiceToken_t token;
+-				sint32 res = (sint32)nn::act::AcquireIndependentServiceToken(&token, OLV_CLIENT_ID, 0);
+-				if (res < 0)
+-				{
+-					g_IsInitialized = false;
+-					return res;
+-				}
+-
+-				// Assuming we're always a production WiiU (non-dev)
+-				uint32 uniqueId = (CafeSystem::GetForegroundTitleId() >> 8) & 0xFFFFF;
+-
+-				char versionBuffer[32];
+-				snprintf(versionBuffer, sizeof(versionBuffer), "%d.%d.%d", OLV_VERSION_MAJOR, OLV_VERSION_MINOR, OLV_VERSION_PATCH);
+-				snprintf(g_DiscoveryResults.userAgent, sizeof(g_DiscoveryResults.userAgent), "%s/%s-%s/%d", "WiiU", "POLV", versionBuffer, uniqueId);
+-
+-				memcpy(g_DiscoveryResults.serviceToken, token.token, sizeof(g_DiscoveryResults.serviceToken));
+-
+-				sint32 discoveryRes = MakeDiscoveryRequest();
+-				if (discoveryRes < 0)
+-					g_IsInitialized = false;
+-
+-				return discoveryRes;
+-			}
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		sint32 InitializePortalApp(nn::olv::PortalAppParam* pPortalAppParam, nn::olv::InitializeParam* pInitializeParam)
+-		{
+-			sint32 result = Initialize(pInitializeParam);
+-			if (result != OLV_RESULT_SUCCESS)
+-				return result;
+-
+-			memcpy(pPortalAppParam->m_ParamPack, g_ParamPack.encodedParamPack, sizeof(g_ParamPack.encodedParamPack));
+-			memcpy(pPortalAppParam->m_ServiceToken, g_DiscoveryResults.serviceToken, sizeof(g_DiscoveryResults.serviceToken));
+-
+-			snprintf(reinterpret_cast<char*>(pPortalAppParam->m_StartUrl), sizeof(pPortalAppParam->m_StartUrl),
+-				"%s/titles/show?src=menu", g_DiscoveryResults.portalEndpoint);
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-
+-		namespace Report
+-		{
+-			uint32 GetReportTypes()
+-			{
+-				return g_ReportTypes;
+-			}
+-
+-			void SetReportTypes(uint32 reportTypes)
+-			{
+-				g_ReportTypes = reportTypes | 0x1000;
+-			}
+-		}
+-
+-		bool IsInitialized()
+-		{
+-			return g_IsInitialized;
+-		}
+-	}
+-}
+\ No newline at end of file
++#include "nn_olv_InitializeTypes.h"
++#include "CafeSystem.h"
++#include "Cafe/OS/libs/nn_act/nn_act.h"
++#include <time.h>
++
++namespace nn
++{
++	namespace olv
++	{
++		uint32_t g_ReportTypes = 0;
++		bool g_IsOnlineMode = false;
++		bool g_IsInitialized = false;
++		bool g_IsOfflineDBMode = false;
++		ParamPackStorage g_ParamPack;
++		DiscoveryResultStorage g_DiscoveryResults;
++
++		sint32 GetOlvAccessKey(uint32* pOutKey)
++		{
++			*pOutKey = 0;
++			uint32 accessKey = CafeSystem::GetForegroundTitleOlvAccesskey();
++			if (accessKey == -1)
++				return OLV_RESULT_STATUS(1102);
++
++			*pOutKey = accessKey;
++			return OLV_RESULT_SUCCESS;
++		}
++
++		sint32 CreateParamPack(uint64_t titleId, uint32_t accessKey)
++		{
++			g_ParamPack.languageId = uint8(GetConfig().console_language.GetValue());
++
++			uint32be simpleAddress = 0;
++			nn::act::GetSimpleAddressIdEx(&simpleAddress, nn::act::ACT_SLOT_CURRENT);
++			uint32 countryCode = nn::act::getCountryCodeFromSimpleAddress(simpleAddress);
++
++			g_ParamPack.countryId = countryCode;
++			g_ParamPack.titleId = titleId;
++			g_ParamPack.platformId = 1;
++
++			g_ParamPack.areaId = (simpleAddress >> 8) & 0xff;
++
++			MCPHANDLE handle = MCP_Open();
++			SysProdSettings sysProdSettings;
++			MCP_GetSysProdSettings(handle, &sysProdSettings);
++			MCP_Close(handle);
++
++			g_ParamPack.regionId = sysProdSettings.platformRegion;
++			g_ParamPack.accessKey = accessKey;
++
++			g_ParamPack.networkRestriction = 0;
++			g_ParamPack.friendRestriction = 0;
++			g_ParamPack.ratingRestriction = 18;
++			g_ParamPack.ratingOrganization = 4; // PEGI ?
++
++			uint64 transferrableId;
++			nn::act::GetTransferableIdEx(&transferrableId, (titleId >> 8) & 0xFFFFF, nn::act::ACT_SLOT_CURRENT);
++			g_ParamPack.transferableId = transferrableId;
++
++			strcpy(g_ParamPack.tzName, "CEMU/Olive"); // Should be nn::act::GetTimeZoneId
++			g_ParamPack.utcOffset = (uint64_t)nn::act::GetUtcOffset() / 1'000'000;
++
++			char paramPackStr[1024];
++			snprintf(
++				paramPackStr,
++				sizeof(paramPackStr),
++				"\\%s\\%llu\\%s\\%u\\%s\\%u\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%d\\%s\\%u\\%s\\%d\\%s\\%llu\\"
++				"%s\\%s\\%s\\%lld\\",
++				"title_id",
++				g_ParamPack.titleId,
++				"access_key",
++				g_ParamPack.accessKey,
++				"platform_id",
++				g_ParamPack.platformId,
++				"region_id",
++				g_ParamPack.regionId,
++				"language_id",
++				g_ParamPack.languageId,
++				"country_id",
++				g_ParamPack.countryId,
++				"area_id",
++				g_ParamPack.areaId,
++				"network_restriction",
++				g_ParamPack.networkRestriction,
++				"friend_restriction",
++				g_ParamPack.friendRestriction,
++				"rating_restriction",
++				g_ParamPack.ratingRestriction,
++				"rating_organization",
++				g_ParamPack.ratingOrganization,
++				"transferable_id",
++				g_ParamPack.transferableId,
++				"tz_name",
++				g_ParamPack.tzName,
++				"utc_offset",
++				g_ParamPack.utcOffset);
++			std::string encodedParamPack = NCrypto::base64Encode(paramPackStr, strnlen(paramPackStr, 1024));
++			memset(&g_ParamPack.encodedParamPack, 0, sizeof(g_ParamPack.encodedParamPack));
++			memcpy(&g_ParamPack.encodedParamPack, encodedParamPack.data(), encodedParamPack.size());
++
++			return OLV_RESULT_SUCCESS;
++		}
++
++		sint32 MakeDiscoveryRequest_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl)
++		{
++			bool reqResult = req.submitRequest();
++			long httpCode = 0;
++			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
++			if (!reqResult)
++			{
++				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
++				if (!(httpCode >= 400))
++					return OLV_RESULT_FAILED_REQUEST;
++			}
++
++			pugi::xml_document doc;
++			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
++			{
++				cemuLog_log(LogType::Force, fmt::format("Invalid XML in discovery service response"));
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			sint32 responseError = CheckOliveResponse(doc);
++			if (responseError < 0)
++				return responseError;
++
++			if (httpCode != 200)
++				return OLV_RESULT_STATUS(httpCode + 4000);
++
++
++			/*
++				<result>
++					<has_error>0</has_error>
++					<version>1</version>
++					<endpoint>
++						<host>api.olv.pretendo.cc</host>
++						<api_host>api.olv.pretendo.cc</api_host>
++						<portal_host>portal.olv.pretendo.cc</portal_host>
++						<n3ds_host>ctr.olv.pretendo.cc</n3ds_host>
++					</endpoint>
++				</result>
++			*/
++
++			pugi::xml_node resultNode = doc.child("result");
++			if (!resultNode)
++			{
++				cemuLog_log(LogType::Force, "Discovery response doesn't contain <result>");
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			pugi::xml_node endpointNode = resultNode.child("endpoint");
++			if (!endpointNode)
++			{
++				cemuLog_log(LogType::Force, "Discovery response doesn't contain <result><endpoint>");
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			// Yes it only uses <host> and <portal_host>
++			std::string_view host = endpointNode.child_value("host");
++			std::string_view portal_host = endpointNode.child_value("portal_host");
++
++			snprintf(g_DiscoveryResults.apiEndpoint, sizeof(g_DiscoveryResults.apiEndpoint), "https://%s", host.data());
++			snprintf(g_DiscoveryResults.portalEndpoint, sizeof(g_DiscoveryResults.portalEndpoint), "https://%s", portal_host.data());
++
++			return OLV_RESULT_SUCCESS;
++		}
++
++		sint32 MakeDiscoveryRequest_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent)
++		{
++			sint32 res = MakeDiscoveryRequest_AsyncRequestImpl(req, reqUrl);
++			coreinit::OSSignalEvent(requestDoneEvent);
++			return res;
++		}
++
++		sint32 MakeDiscoveryRequest()
++		{
++			// =============================================================================
++			// Discovery request | https://discovery.olv.nintendo.net/v1/endpoint
++			// =============================================================================
++
++			CurlRequestHelper req;
++			std::string requestUrl;
++			switch (ActiveSettings::GetNetworkService())
++			{
++				case NetworkService::Pretendo:
++					requestUrl = PretendoURLs::OLVURL;
++					break;
++				case NetworkService::Custom:
++					requestUrl = GetNetworkConfig().urls.OLV.GetValue();
++					break;
++				case NetworkService::Nintendo:
++				default:
++					requestUrl = NintendoURLs::OLVURL;
++					break;
++			}
++
++			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
++			InitializeOliveRequest(req);
++
++			StackAllocator<coreinit::OSEvent> requestDoneEvent;
++			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
++			std::future<sint32> requestRes = CEMU_ASYNC(MakeDiscoveryRequest_AsyncRequest, std::ref(req), requestUrl.c_str(), requestDoneEvent.GetPointer());
++			coreinit::OSWaitEvent(&requestDoneEvent);
++
++			return requestRes.get();
++		}
++
++		sint32 Initialize(nn::olv::InitializeParam* pParam)
++		{
++			if (g_IsInitialized)
++				return OLV_RESULT_ALREADY_INITIALIZED;
++
++			if (!pParam->m_Work)
++			{
++				g_IsInitialized = false;
++				return OLV_RESULT_INVALID_PTR;
++			}
++
++			if (pParam->m_WorkSize < 0x10000)
++			{
++				g_IsInitialized = false;
++				return OLV_RESULT_INVALID_SIZE;
++			}
++
++			uint32_t accessKey;
++			int32_t olvAccessKeyStatus = GetOlvAccessKey(&accessKey);
++			if (olvAccessKeyStatus < 0)
++			{
++				g_IsInitialized = false;
++				return olvAccessKeyStatus;
++			}
++
++			uint64_t tid = CafeSystem::GetForegroundTitleId();
++			int32_t createParamPackResult = CreateParamPack(tid, accessKey);
++			if (createParamPackResult < 0)
++			{
++				g_IsInitialized = false;
++				return createParamPackResult;
++			}
++
++			g_IsInitialized = true;
++
++			if(ActiveSettings::GetNetworkService() == NetworkService::Nintendo)
++			{
++				// since the official Miiverse was shut down, use local post archive instead
++				g_IsOnlineMode = true;
++				g_IsOfflineDBMode = true;
++				return OLV_RESULT_SUCCESS;
++			}
++			if ((pParam->m_Flags & InitializeParam::FLAG_OFFLINE_MODE) == 0)
++			{
++				g_IsOnlineMode = true;
++
++				independentServiceToken_t token;
++				sint32 res = (sint32)nn::act::AcquireIndependentServiceToken(&token, OLV_CLIENT_ID, 0);
++				if (res < 0)
++				{
++					g_IsInitialized = false;
++					return res;
++				}
++
++				// Assuming we're always a production WiiU (non-dev)
++				uint32 uniqueId = (CafeSystem::GetForegroundTitleId() >> 8) & 0xFFFFF;
++
++				char versionBuffer[32];
++				snprintf(versionBuffer, sizeof(versionBuffer), "%d.%d.%d", OLV_VERSION_MAJOR, OLV_VERSION_MINOR, OLV_VERSION_PATCH);
++				snprintf(g_DiscoveryResults.userAgent, sizeof(g_DiscoveryResults.userAgent), "%s/%s-%s/%d", "WiiU", "POLV", versionBuffer, uniqueId);
++
++				memcpy(g_DiscoveryResults.serviceToken, token.token, sizeof(g_DiscoveryResults.serviceToken));
++
++				sint32 discoveryRes = MakeDiscoveryRequest();
++				if (discoveryRes < 0)
++					g_IsInitialized = false;
++
++				return discoveryRes;
++			}
++
++			return OLV_RESULT_SUCCESS;
++		}
++
++		sint32 InitializePortalApp(nn::olv::PortalAppParam* pPortalAppParam, nn::olv::InitializeParam* pInitializeParam)
++		{
++			sint32 result = Initialize(pInitializeParam);
++			if (result != OLV_RESULT_SUCCESS)
++				return result;
++
++			memcpy(pPortalAppParam->m_ParamPack, g_ParamPack.encodedParamPack, sizeof(g_ParamPack.encodedParamPack));
++			memcpy(pPortalAppParam->m_ServiceToken, g_DiscoveryResults.serviceToken, sizeof(g_DiscoveryResults.serviceToken));
++
++			snprintf(reinterpret_cast<char*>(pPortalAppParam->m_StartUrl), sizeof(pPortalAppParam->m_StartUrl),
++				"%s/titles/show?src=menu", g_DiscoveryResults.portalEndpoint);
++
++			return OLV_RESULT_SUCCESS;
++		}
++
++		namespace Report
++		{
++			uint32 GetReportTypes()
++			{
++				return g_ReportTypes;
++			}
++
++			void SetReportTypes(uint32 reportTypes)
++			{
++				g_ReportTypes = reportTypes | 0x1000;
++			}
++		}
++
++		bool IsInitialized()
++		{
++			return g_IsInitialized;
++		}
++	}
++}
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_OfflineDB.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_OfflineDB.cpp
+index 391f59b..167e5c6 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_OfflineDB.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_OfflineDB.cpp
+@@ -177,7 +177,7 @@ namespace nn
+ 
+ 			StackAllocator<coreinit::OSEvent> doneEvent;
+ 			coreinit::OSInitEvent(&doneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			auto asyncTask = std::async(std::launch::async, _Async_OfflineDB_DownloadPostDataListParam_DownloadPostDataList, doneEvent.GetPointer(), downloadedTopicData, downloadedPostData, postCountOut, maxCount, param);
++			auto asyncTask = CEMU_ASYNC(_Async_OfflineDB_DownloadPostDataListParam_DownloadPostDataList, doneEvent.GetPointer(), downloadedTopicData, downloadedPostData, postCountOut, maxCount, param);
+ 			coreinit::OSWaitEvent(&doneEvent);
+ 			nnResult r = asyncTask.get();
+ 			return r;
+@@ -206,7 +206,7 @@ namespace nn
+ 		{
+ 			StackAllocator<coreinit::OSEvent> doneEvent;
+ 			coreinit::OSInitEvent(&doneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			auto asyncTask = std::async(std::launch::async, _Async_OfflineDB_DownloadPostDataListParam_DownloadExternalImageData, doneEvent.GetPointer(), _this, imageDataOut, imageSizeOut, maxSize);
++			auto asyncTask = CEMU_ASYNC(_Async_OfflineDB_DownloadPostDataListParam_DownloadExternalImageData, doneEvent.GetPointer(), _this, imageDataOut, imageSizeOut, maxSize);
+ 			coreinit::OSWaitEvent(&doneEvent);
+ 			nnResult r = asyncTask.get();
+ 			return r;
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_UploadCommunityTypes.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_UploadCommunityTypes.cpp
+index 3277c9d..34edd73 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_UploadCommunityTypes.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_UploadCommunityTypes.cpp
+@@ -1,306 +1,306 @@
+-#include "nn_olv_UploadCommunityTypes.h"
+-#include <algorithm>
+-
+-namespace nn
+-{
+-	namespace olv
+-	{
+-
+-		sint32 UploadCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
+-			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam);
+-
+-		sint32 UploadCommunityData_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
+-			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam
+-		)
+-		{
+-			sint32 res = UploadCommunityData_AsyncRequestImpl(req, reqUrl, pOutData, pParam);
+-			coreinit::OSSignalEvent(requestDoneEvent);
+-			return res;
+-		}
+-
+-		sint32 UploadCommunityData(UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam)
+-		{
+-			if (!nn::olv::g_IsInitialized)
+-				return OLV_RESULT_NOT_INITIALIZED;
+-			
+-			if (!nn::olv::g_IsOnlineMode)
+-				return OLV_RESULT_OFFLINE_MODE_REQUEST;
+-
+-			if (!pParam)
+-				return OLV_RESULT_INVALID_PTR;
+-
+-			if (pOutData)
+-				UploadedCommunityData::Clean(pOutData);
+-
+-			char requestUrl[512];
+-			if (pParam->flags & UploadCommunityDataParam::FLAG_DELETION)
+-			{
+-				if (!pParam->communityId)
+-					return OLV_RESULT_INVALID_PARAMETER;
+-
+-				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.delete", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
+-			}
+-			else
+-			{
+-				if (pParam->communityId)
+-					snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
+-				else
+-					snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities", g_DiscoveryResults.apiEndpoint);
+-			}
+-
+-			
+-			CurlRequestHelper req;
+-			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
+-			InitializeOliveRequest(req);
+-
+-			StackAllocator<coreinit::OSEvent> requestDoneEvent;
+-			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			std::future<sint32> requestRes = std::async(std::launch::async, UploadCommunityData_AsyncRequest, std::ref(req), requestUrl, requestDoneEvent.GetPointer(), pOutData, pParam);
+-			coreinit::OSWaitEvent(&requestDoneEvent);
+-
+-			return requestRes.get();
+-		}
+-
+-		sint32 UploadCommunityData(UploadCommunityDataParam const* pParam)
+-		{
+-			return UploadCommunityData(nullptr, pParam);
+-		}
+-
+-		sint32 UploadCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
+-			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam)
+-		{
+-			sint32 res = OLV_RESULT_SUCCESS;
+-
+-			std::string base64icon;
+-			std::string form_name;
+-			std::string form_desc;
+-			std::string form_searchKey[5];
+-			std::string encodedAppData;
+-			uint8* encodedIcon = nullptr;
+-
+-			struct curl_httppost* post = nullptr;
+-			struct curl_httppost* last = nullptr;
+-
+-			try
+-			{
+-				if (!pParam->iconData.IsNull())
+-				{
+-					encodedIcon = new uint8[pParam->iconDataLen];
+-					if (encodedIcon)
+-					{
+-						sint32 iconEncodeRes = EncodeTGA(pParam->iconData.GetPtr(), pParam->iconDataLen, encodedIcon, pParam->iconDataLen, TGACheckType::CHECK_COMMUNITY_ICON);
+-						if (iconEncodeRes <= 0)
+-						{
+-							delete[] encodedIcon;
+-							return OLV_RESULT_NOT_ENOUGH_SIZE; // ?
+-						}
+-
+-						base64icon = NCrypto::base64Encode(encodedIcon, iconEncodeRes);
+-						res = olv_curlformcode_to_error(
+-							curl_formadd(&post, &last,
+-								CURLFORM_COPYNAME, "icon",
+-								CURLFORM_PTRCONTENTS, base64icon.data(),
+-								CURLFORM_CONTENTSLENGTH, base64icon.size(),
+-								CURLFORM_END)
+-						);
+-
+-						if (res < 0)
+-							throw std::runtime_error("curl_formadd() error! - icon");
+-					}
+-				}
+-
+-				if (pParam->titleText[0])
+-				{
+-					form_name = StringHelpers::ToUtf8((const uint16be*)pParam->titleText, 127);
+-					res = olv_curlformcode_to_error(
+-						curl_formadd(&post, &last,
+-							CURLFORM_COPYNAME, "name",
+-							CURLFORM_PTRCONTENTS, form_name.data(),
+-							CURLFORM_CONTENTSLENGTH, form_name.size(),
+-							CURLFORM_END)
+-					);
+-
+-					if (res < 0)
+-						throw std::runtime_error("curl_formadd() error! - name");
+-				}
+-
+-				if (pParam->description[0])
+-				{
+-					form_desc = StringHelpers::ToUtf8((const uint16be*)pParam->description, 255);
+-					res = olv_curlformcode_to_error(
+-						curl_formadd(&post, &last,
+-							CURLFORM_COPYNAME, "description",
+-							CURLFORM_PTRCONTENTS, form_desc.data(),
+-							CURLFORM_CONTENTSLENGTH, form_desc.size(),
+-							CURLFORM_END)
+-					);
+-
+-
+-					if (res < 0)
+-						throw std::runtime_error("curl_formadd() error! - description");
+-				}
+-
+-				for (int i = 0; i < 5; i++)
+-				{
+-					if (pParam->searchKeys[i][0])
+-					{
+-						form_searchKey[i] = StringHelpers::ToUtf8((const uint16be*)pParam->searchKeys[i], 151);
+-						res = olv_curlformcode_to_error(
+-							curl_formadd(&post, &last,
+-								CURLFORM_COPYNAME, "search_key",
+-								CURLFORM_PTRCONTENTS, form_searchKey[i].data(),
+-								CURLFORM_CONTENTSLENGTH, form_searchKey[i].size(),
+-								CURLFORM_END)
+-						);
+-
+-						if (res < 0)
+-							throw std::runtime_error("curl_formadd() error! - search_key");
+-					}
+-				}
+-
+-				if (!pParam->appData.IsNull())
+-				{
+-					encodedAppData = NCrypto::base64Encode(pParam->appData.GetPtr(), pParam->appDataLen);
+-					if (encodedAppData.size() < pParam->appDataLen)
+-						res = OLV_RESULT_FATAL(101);
+-					else
+-					{
+-						res = olv_curlformcode_to_error(
+-							curl_formadd(&post, &last,
+-								CURLFORM_COPYNAME, "app_data",
+-								CURLFORM_PTRCONTENTS, encodedAppData.data(),
+-								CURLFORM_CONTENTSLENGTH, encodedAppData.size(),
+-								CURLFORM_END)
+-						);
+-
+-						if (res < 0)
+-							throw std::runtime_error("curl_formadd() error! - app_data");
+-					}
+-				}
+-			}
+-			catch (const std::runtime_error& error)
+-			{
+-				cemuLog_log(LogType::Force, "Error in multipart curl -> {}", error.what());
+-				curl_formfree(post);
+-
+-				if (encodedIcon)
+-					delete[] encodedIcon;
+-
+-				return res;
+-			}
+-
+-			curl_easy_setopt(req.getCURL(), CURLOPT_HTTPPOST, post);
+-			req.setUseMultipartFormData(true);
+-
+-			bool reqResult = req.submitRequest(true);
+-			long httpCode = 0;
+-			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
+-
+-			if (encodedIcon)
+-				delete[] encodedIcon;
+-
+-			if (!reqResult)
+-			{
+-				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
+-				if (!(httpCode >= 400))
+-					return OLV_RESULT_FAILED_REQUEST;
+-			}
+-
+-			pugi::xml_document doc;
+-			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
+-			{
+-				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community upload response"));
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			sint32 responseError = CheckOliveResponse(doc);
+-			if (responseError < 0)
+-				return responseError;
+-
+-			if (httpCode != 200)
+-				return OLV_RESULT_STATUS(httpCode + 4000);
+-			
+-			if (pOutData)
+-			{
+-
+-				std::string_view app_data = doc.select_node("//app_data").node().child_value();
+-				std::string_view community_id = doc.select_node("//community_id").node().child_value();
+-				std::string_view name = doc.select_node("//name").node().child_value();
+-				std::string_view description = doc.select_node("//description").node().child_value();
+-				std::string_view pid = doc.select_node("//pid").node().child_value();
+-				std::string_view icon = doc.select_node("//icon").node().child_value();
+-
+-				if (app_data.size() != 0)
+-				{
+-					auto app_data_bin = NCrypto::base64Decode(app_data);
+-					if (app_data_bin.size() != 0) {
+-						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
+-						pOutData->flags |= UploadedCommunityData::FLAG_HAS_APP_DATA;
+-						pOutData->appDataLen = app_data_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
+-				if (community_id_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->communityId = community_id_val;
+-
+-				if (name.size() != 0)
+-				{
+-					auto name_utf16 = StringHelpers::FromUtf8(name);
+-					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
+-					if (name_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < name_utf16.size(); i++)
+-							pOutData->titleText[i] = name_utf16.at(i);
+-
+-						pOutData->flags |= UploadedCommunityData::FLAG_HAS_TITLE_TEXT;
+-						pOutData->titleTextMaxLen = name_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				if (description.size() != 0)
+-				{
+-					auto description_utf16 = StringHelpers::FromUtf8(description);
+-					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
+-					if (description_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < description_utf16.size(); i++)
+-							pOutData->description[i] = description_utf16.at(i);
+-
+-						pOutData->flags |= UploadedCommunityData::FLAG_HAS_DESC_TEXT;
+-						pOutData->descriptionMaxLen = description_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
+-				if (pid_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->pid = pid_val;
+-
+-				if (icon.size() != 0)
+-				{
+-					auto icon_bin = NCrypto::base64Decode(icon);
+-					if (icon_bin.size() != 0)
+-					{
+-						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
+-						pOutData->flags |= UploadedCommunityData::FLAG_HAS_ICON_DATA;
+-						pOutData->iconDataSize = icon_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-			}
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-	}
++#include "nn_olv_UploadCommunityTypes.h"
++#include <algorithm>
++
++namespace nn
++{
++	namespace olv
++	{
++
++		sint32 UploadCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
++			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam);
++
++		sint32 UploadCommunityData_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
++			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam
++		)
++		{
++			sint32 res = UploadCommunityData_AsyncRequestImpl(req, reqUrl, pOutData, pParam);
++			coreinit::OSSignalEvent(requestDoneEvent);
++			return res;
++		}
++
++		sint32 UploadCommunityData(UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam)
++		{
++			if (!nn::olv::g_IsInitialized)
++				return OLV_RESULT_NOT_INITIALIZED;
++			
++			if (!nn::olv::g_IsOnlineMode)
++				return OLV_RESULT_OFFLINE_MODE_REQUEST;
++
++			if (!pParam)
++				return OLV_RESULT_INVALID_PTR;
++
++			if (pOutData)
++				UploadedCommunityData::Clean(pOutData);
++
++			char requestUrl[512];
++			if (pParam->flags & UploadCommunityDataParam::FLAG_DELETION)
++			{
++				if (!pParam->communityId)
++					return OLV_RESULT_INVALID_PARAMETER;
++
++				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.delete", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
++			}
++			else
++			{
++				if (pParam->communityId)
++					snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
++				else
++					snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities", g_DiscoveryResults.apiEndpoint);
++			}
++
++			
++			CurlRequestHelper req;
++			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
++			InitializeOliveRequest(req);
++
++			StackAllocator<coreinit::OSEvent> requestDoneEvent;
++			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
++			std::future<sint32> requestRes = CEMU_ASYNC(UploadCommunityData_AsyncRequest, std::ref(req), requestUrl, requestDoneEvent.GetPointer(), pOutData, pParam);
++			coreinit::OSWaitEvent(&requestDoneEvent);
++
++			return requestRes.get();
++		}
++
++		sint32 UploadCommunityData(UploadCommunityDataParam const* pParam)
++		{
++			return UploadCommunityData(nullptr, pParam);
++		}
++
++		sint32 UploadCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
++			UploadedCommunityData* pOutData, UploadCommunityDataParam const* pParam)
++		{
++			sint32 res = OLV_RESULT_SUCCESS;
++
++			std::string base64icon;
++			std::string form_name;
++			std::string form_desc;
++			std::string form_searchKey[5];
++			std::string encodedAppData;
++			uint8* encodedIcon = nullptr;
++
++			struct curl_httppost* post = nullptr;
++			struct curl_httppost* last = nullptr;
++
++			try
++			{
++				if (!pParam->iconData.IsNull())
++				{
++					encodedIcon = new uint8[pParam->iconDataLen];
++					if (encodedIcon)
++					{
++						sint32 iconEncodeRes = EncodeTGA(pParam->iconData.GetPtr(), pParam->iconDataLen, encodedIcon, pParam->iconDataLen, TGACheckType::CHECK_COMMUNITY_ICON);
++						if (iconEncodeRes <= 0)
++						{
++							delete[] encodedIcon;
++							return OLV_RESULT_NOT_ENOUGH_SIZE; // ?
++						}
++
++						base64icon = NCrypto::base64Encode(encodedIcon, iconEncodeRes);
++						res = olv_curlformcode_to_error(
++							curl_formadd(&post, &last,
++								CURLFORM_COPYNAME, "icon",
++								CURLFORM_PTRCONTENTS, base64icon.data(),
++								CURLFORM_CONTENTSLENGTH, base64icon.size(),
++								CURLFORM_END)
++						);
++
++						if (res < 0)
++							throw std::runtime_error("curl_formadd() error! - icon");
++					}
++				}
++
++				if (pParam->titleText[0])
++				{
++					form_name = StringHelpers::ToUtf8((const uint16be*)pParam->titleText, 127);
++					res = olv_curlformcode_to_error(
++						curl_formadd(&post, &last,
++							CURLFORM_COPYNAME, "name",
++							CURLFORM_PTRCONTENTS, form_name.data(),
++							CURLFORM_CONTENTSLENGTH, form_name.size(),
++							CURLFORM_END)
++					);
++
++					if (res < 0)
++						throw std::runtime_error("curl_formadd() error! - name");
++				}
++
++				if (pParam->description[0])
++				{
++					form_desc = StringHelpers::ToUtf8((const uint16be*)pParam->description, 255);
++					res = olv_curlformcode_to_error(
++						curl_formadd(&post, &last,
++							CURLFORM_COPYNAME, "description",
++							CURLFORM_PTRCONTENTS, form_desc.data(),
++							CURLFORM_CONTENTSLENGTH, form_desc.size(),
++							CURLFORM_END)
++					);
++
++
++					if (res < 0)
++						throw std::runtime_error("curl_formadd() error! - description");
++				}
++
++				for (int i = 0; i < 5; i++)
++				{
++					if (pParam->searchKeys[i][0])
++					{
++						form_searchKey[i] = StringHelpers::ToUtf8((const uint16be*)pParam->searchKeys[i], 151);
++						res = olv_curlformcode_to_error(
++							curl_formadd(&post, &last,
++								CURLFORM_COPYNAME, "search_key",
++								CURLFORM_PTRCONTENTS, form_searchKey[i].data(),
++								CURLFORM_CONTENTSLENGTH, form_searchKey[i].size(),
++								CURLFORM_END)
++						);
++
++						if (res < 0)
++							throw std::runtime_error("curl_formadd() error! - search_key");
++					}
++				}
++
++				if (!pParam->appData.IsNull())
++				{
++					encodedAppData = NCrypto::base64Encode(pParam->appData.GetPtr(), pParam->appDataLen);
++					if (encodedAppData.size() < pParam->appDataLen)
++						res = OLV_RESULT_FATAL(101);
++					else
++					{
++						res = olv_curlformcode_to_error(
++							curl_formadd(&post, &last,
++								CURLFORM_COPYNAME, "app_data",
++								CURLFORM_PTRCONTENTS, encodedAppData.data(),
++								CURLFORM_CONTENTSLENGTH, encodedAppData.size(),
++								CURLFORM_END)
++						);
++
++						if (res < 0)
++							throw std::runtime_error("curl_formadd() error! - app_data");
++					}
++				}
++			}
++			catch (const std::runtime_error& error)
++			{
++				cemuLog_log(LogType::Force, "Error in multipart curl -> {}", error.what());
++				curl_formfree(post);
++
++				if (encodedIcon)
++					delete[] encodedIcon;
++
++				return res;
++			}
++
++			curl_easy_setopt(req.getCURL(), CURLOPT_HTTPPOST, post);
++			req.setUseMultipartFormData(true);
++
++			bool reqResult = req.submitRequest(true);
++			long httpCode = 0;
++			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
++
++			if (encodedIcon)
++				delete[] encodedIcon;
++
++			if (!reqResult)
++			{
++				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
++				if (!(httpCode >= 400))
++					return OLV_RESULT_FAILED_REQUEST;
++			}
++
++			pugi::xml_document doc;
++			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
++			{
++				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community upload response"));
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			sint32 responseError = CheckOliveResponse(doc);
++			if (responseError < 0)
++				return responseError;
++
++			if (httpCode != 200)
++				return OLV_RESULT_STATUS(httpCode + 4000);
++			
++			if (pOutData)
++			{
++
++				std::string_view app_data = doc.select_node("//app_data").node().child_value();
++				std::string_view community_id = doc.select_node("//community_id").node().child_value();
++				std::string_view name = doc.select_node("//name").node().child_value();
++				std::string_view description = doc.select_node("//description").node().child_value();
++				std::string_view pid = doc.select_node("//pid").node().child_value();
++				std::string_view icon = doc.select_node("//icon").node().child_value();
++
++				if (app_data.size() != 0)
++				{
++					auto app_data_bin = NCrypto::base64Decode(app_data);
++					if (app_data_bin.size() != 0) {
++						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
++						pOutData->flags |= UploadedCommunityData::FLAG_HAS_APP_DATA;
++						pOutData->appDataLen = app_data_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
++				if (community_id_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->communityId = community_id_val;
++
++				if (name.size() != 0)
++				{
++					auto name_utf16 = StringHelpers::FromUtf8(name);
++					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
++					if (name_utf16.size() != 0)
++					{
++						for (int i = 0; i < name_utf16.size(); i++)
++							pOutData->titleText[i] = name_utf16.at(i);
++
++						pOutData->flags |= UploadedCommunityData::FLAG_HAS_TITLE_TEXT;
++						pOutData->titleTextMaxLen = name_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				if (description.size() != 0)
++				{
++					auto description_utf16 = StringHelpers::FromUtf8(description);
++					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
++					if (description_utf16.size() != 0)
++					{
++						for (int i = 0; i < description_utf16.size(); i++)
++							pOutData->description[i] = description_utf16.at(i);
++
++						pOutData->flags |= UploadedCommunityData::FLAG_HAS_DESC_TEXT;
++						pOutData->descriptionMaxLen = description_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
++				if (pid_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->pid = pid_val;
++
++				if (icon.size() != 0)
++				{
++					auto icon_bin = NCrypto::base64Decode(icon);
++					if (icon_bin.size() != 0)
++					{
++						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
++						pOutData->flags |= UploadedCommunityData::FLAG_HAS_ICON_DATA;
++						pOutData->iconDataSize = icon_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++			}
++
++			return OLV_RESULT_SUCCESS;
++		}
++	}
+ }
+\ No newline at end of file
+diff --git a/src/Cafe/OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.cpp b/src/Cafe/OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.cpp
+index 4b5fbbf..278be6e 100644
+--- a/src/Cafe/OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.cpp
++++ b/src/Cafe/OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.cpp
+@@ -1,172 +1,172 @@
+-#include "nn_olv_UploadFavoriteTypes.h"
+-#include <algorithm>
+-#include <cstddef>
+-
+-namespace nn
+-{
+-	namespace olv
+-	{
+-	
+-		sint32 UploadFavoriteToCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
+-			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
+-		);
+-
+-		sint32 UploadFavoriteToCommunityData_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
+-			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
+-		)
+-		{
+-			sint32 res = UploadFavoriteToCommunityData_AsyncRequestImpl(req, reqUrl, pOutData, pParam);
+-			coreinit::OSSignalEvent(requestDoneEvent);
+-			return res;
+-		}
+-
+-		sint32 UploadFavoriteToCommunityData(UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam)
+-		{
+-			if (!nn::olv::g_IsInitialized)
+-				return OLV_RESULT_NOT_INITIALIZED;
+-
+-			if (!nn::olv::g_IsOnlineMode)
+-				return OLV_RESULT_OFFLINE_MODE_REQUEST;
+-
+-			if (!pParam)
+-				return OLV_RESULT_INVALID_PTR;
+-
+-			if (pOutData)
+-				UploadedFavoriteToCommunityData::Clean(pOutData);
+-
+-			char requestUrl[512];
+-			if (pParam->flags & UploadFavoriteToCommunityDataParam::FLAG_DELETION)
+-				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.unfavorite", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
+-			else 
+-				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.favorite", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
+-			
+-			CurlRequestHelper req;
+-			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
+-			InitializeOliveRequest(req);
+-
+-			StackAllocator<coreinit::OSEvent> requestDoneEvent;
+-			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+-			std::future<sint32> requestRes = std::async(std::launch::async, UploadFavoriteToCommunityData_AsyncRequest, std::ref(req), requestUrl, requestDoneEvent.GetPointer(), pOutData, pParam);
+-			coreinit::OSWaitEvent(&requestDoneEvent);
+-
+-			return requestRes.get();
+-		}
+-
+-		sint32 UploadFavoriteToCommunityData(const UploadFavoriteToCommunityDataParam* pParam)
+-		{
+-			return UploadFavoriteToCommunityData(nullptr, pParam);
+-		}
+-
+-		sint32 UploadFavoriteToCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
+-			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
+-		)
+-		{
+-			bool reqResult = req.submitRequest(true);
+-			long httpCode = 0;
+-			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
+-
+-			if (!reqResult)
+-			{
+-				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
+-				if (!(httpCode >= 400))
+-					return OLV_RESULT_FAILED_REQUEST;
+-			}
+-
+-			pugi::xml_document doc;
+-			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
+-			{
+-				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community favorite upload response"));
+-				return OLV_RESULT_INVALID_XML;
+-			}
+-
+-			sint32 responseError = CheckOliveResponse(doc);
+-			if (responseError < 0)
+-				return responseError;
+-
+-			if (httpCode != 200)
+-				return OLV_RESULT_STATUS(httpCode + 4000);
+-
+-			if (pOutData)
+-			{
+-				std::string_view app_data = doc.select_node("//app_data").node().child_value();
+-				std::string_view community_id = doc.select_node("//community_id").node().child_value();
+-				std::string_view name = doc.select_node("//name").node().child_value();
+-				std::string_view description = doc.select_node("//description").node().child_value();
+-				std::string_view pid = doc.select_node("//pid").node().child_value();
+-				std::string_view icon = doc.select_node("//icon").node().child_value();
+-
+-				if (app_data.size() != 0)
+-				{
+-					auto app_data_bin = NCrypto::base64Decode(app_data);
+-					if (app_data_bin.size() != 0)
+-					{
+-						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
+-						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_APP_DATA;
+-						pOutData->appDataLen = app_data_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
+-				if (community_id_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->communityId = community_id_val;
+-
+-				if (name.size() != 0)
+-				{
+-					auto name_utf16 = StringHelpers::FromUtf8(name);
+-					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
+-					if (name_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < name_utf16.size(); i++)
+-							pOutData->titleText[i] = name_utf16.at(i);
+-
+-						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_TITLE_TEXT;
+-						pOutData->titleTextMaxLen = name_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				if (description.size() != 0)
+-				{
+-					auto description_utf16 = StringHelpers::FromUtf8(description);
+-					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
+-					if (description_utf16.size() != 0)
+-					{
+-						for (int i = 0; i < description_utf16.size(); i++)
+-							pOutData->description[i] = description_utf16.at(i);
+-
+-						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_DESC_TEXT;
+-						pOutData->descriptionMaxLen = description_utf16.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-
+-				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
+-				if (pid_val == -1)
+-					return OLV_RESULT_INVALID_INTEGER_FIELD;
+-
+-				pOutData->pid = pid_val;
+-
+-				if (icon.size() != 0)
+-				{
+-					auto icon_bin = NCrypto::base64Decode(icon);
+-					if (icon_bin.size() != 0)
+-					{
+-						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
+-						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_ICON_DATA;
+-						pOutData->iconDataSize = icon_bin.size();
+-					}
+-					else
+-						return OLV_RESULT_INVALID_TEXT_FIELD;
+-				}
+-			}
+-
+-			return OLV_RESULT_SUCCESS;
+-		}
+-	}
+-}
++#include "nn_olv_UploadFavoriteTypes.h"
++#include <algorithm>
++#include <cstddef>
++
++namespace nn
++{
++	namespace olv
++	{
++	
++		sint32 UploadFavoriteToCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
++			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
++		);
++
++		sint32 UploadFavoriteToCommunityData_AsyncRequest(CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
++			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
++		)
++		{
++			sint32 res = UploadFavoriteToCommunityData_AsyncRequestImpl(req, reqUrl, pOutData, pParam);
++			coreinit::OSSignalEvent(requestDoneEvent);
++			return res;
++		}
++
++		sint32 UploadFavoriteToCommunityData(UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam)
++		{
++			if (!nn::olv::g_IsInitialized)
++				return OLV_RESULT_NOT_INITIALIZED;
++
++			if (!nn::olv::g_IsOnlineMode)
++				return OLV_RESULT_OFFLINE_MODE_REQUEST;
++
++			if (!pParam)
++				return OLV_RESULT_INVALID_PTR;
++
++			if (pOutData)
++				UploadedFavoriteToCommunityData::Clean(pOutData);
++
++			char requestUrl[512];
++			if (pParam->flags & UploadFavoriteToCommunityDataParam::FLAG_DELETION)
++				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.unfavorite", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
++			else 
++				snprintf(requestUrl, sizeof(requestUrl), "%s/v1/communities/%u.favorite", g_DiscoveryResults.apiEndpoint, pParam->communityId.value());
++			
++			CurlRequestHelper req;
++			req.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
++			InitializeOliveRequest(req);
++
++			StackAllocator<coreinit::OSEvent> requestDoneEvent;
++			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
++			std::future<sint32> requestRes = CEMU_ASYNC(UploadFavoriteToCommunityData_AsyncRequest, std::ref(req), requestUrl, requestDoneEvent.GetPointer(), pOutData, pParam);
++			coreinit::OSWaitEvent(&requestDoneEvent);
++
++			return requestRes.get();
++		}
++
++		sint32 UploadFavoriteToCommunityData(const UploadFavoriteToCommunityDataParam* pParam)
++		{
++			return UploadFavoriteToCommunityData(nullptr, pParam);
++		}
++
++		sint32 UploadFavoriteToCommunityData_AsyncRequestImpl(CurlRequestHelper& req, const char* reqUrl,
++			UploadedFavoriteToCommunityData* pOutData, const UploadFavoriteToCommunityDataParam* pParam
++		)
++		{
++			bool reqResult = req.submitRequest(true);
++			long httpCode = 0;
++			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
++
++			if (!reqResult)
++			{
++				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
++				if (!(httpCode >= 400))
++					return OLV_RESULT_FAILED_REQUEST;
++			}
++
++			pugi::xml_document doc;
++			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
++			{
++				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community favorite upload response"));
++				return OLV_RESULT_INVALID_XML;
++			}
++
++			sint32 responseError = CheckOliveResponse(doc);
++			if (responseError < 0)
++				return responseError;
++
++			if (httpCode != 200)
++				return OLV_RESULT_STATUS(httpCode + 4000);
++
++			if (pOutData)
++			{
++				std::string_view app_data = doc.select_node("//app_data").node().child_value();
++				std::string_view community_id = doc.select_node("//community_id").node().child_value();
++				std::string_view name = doc.select_node("//name").node().child_value();
++				std::string_view description = doc.select_node("//description").node().child_value();
++				std::string_view pid = doc.select_node("//pid").node().child_value();
++				std::string_view icon = doc.select_node("//icon").node().child_value();
++
++				if (app_data.size() != 0)
++				{
++					auto app_data_bin = NCrypto::base64Decode(app_data);
++					if (app_data_bin.size() != 0)
++					{
++						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
++						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_APP_DATA;
++						pOutData->appDataLen = app_data_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
++				if (community_id_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->communityId = community_id_val;
++
++				if (name.size() != 0)
++				{
++					auto name_utf16 = StringHelpers::FromUtf8(name);
++					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
++					if (name_utf16.size() != 0)
++					{
++						for (int i = 0; i < name_utf16.size(); i++)
++							pOutData->titleText[i] = name_utf16.at(i);
++
++						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_TITLE_TEXT;
++						pOutData->titleTextMaxLen = name_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				if (description.size() != 0)
++				{
++					auto description_utf16 = StringHelpers::FromUtf8(description);
++					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
++					if (description_utf16.size() != 0)
++					{
++						for (int i = 0; i < description_utf16.size(); i++)
++							pOutData->description[i] = description_utf16.at(i);
++
++						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_DESC_TEXT;
++						pOutData->descriptionMaxLen = description_utf16.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++
++				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
++				if (pid_val == -1)
++					return OLV_RESULT_INVALID_INTEGER_FIELD;
++
++				pOutData->pid = pid_val;
++
++				if (icon.size() != 0)
++				{
++					auto icon_bin = NCrypto::base64Decode(icon);
++					if (icon_bin.size() != 0)
++					{
++						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
++						pOutData->flags |= UploadedFavoriteToCommunityData::FLAG_HAS_ICON_DATA;
++						pOutData->iconDataSize = icon_bin.size();
++					}
++					else
++						return OLV_RESULT_INVALID_TEXT_FIELD;
++				}
++			}
++
++			return OLV_RESULT_SUCCESS;
++		}
++	}
++}
+diff --git a/src/Cafe/OS/libs/nsyshid/Dimensions.cpp b/src/Cafe/OS/libs/nsyshid/Dimensions.cpp
+index b23560f..4583fe5 100644
+--- a/src/Cafe/OS/libs/nsyshid/Dimensions.cpp
++++ b/src/Cafe/OS/libs/nsyshid/Dimensions.cpp
+@@ -530,7 +530,7 @@ namespace nsyshid
+ 			}
+ 			else
+ 			{
+-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
++				CEMU_SLEEP_FOR(std::chrono::milliseconds(100));
+ 			}
+ 		}
+ 		while (responded == false);
+@@ -1108,8 +1108,7 @@ namespace nsyshid
+ 		uid_buffer[0] = 0x04;
+ 		uid_buffer[7] = 0x80;
+ 
+-		std::random_device rd;
+-		std::mt19937 mt(rd());
++		CEMU_RANDOM_ENGINE(mt);
+ 		std::uniform_int_distribution<int> dist(0, 255);
+ 
+ 		uid_buffer[1] = dist(mt);
+diff --git a/src/Cafe/OS/libs/nsyshid/Infinity.cpp b/src/Cafe/OS/libs/nsyshid/Infinity.cpp
+index 94ef817..6f260f3 100644
+--- a/src/Cafe/OS/libs/nsyshid/Infinity.cpp
++++ b/src/Cafe/OS/libs/nsyshid/Infinity.cpp
+@@ -979,8 +979,7 @@ namespace nsyshid
+ 		std::vector<uint8> sha1Calc = {SHA1_CONSTANT.begin(), SHA1_CONSTANT.end() - 1};
+ 
+ 		// Generate random UID, used for AES encrypt/decrypt
+-		std::random_device rd;
+-		std::mt19937 mt(rd());
++		CEMU_RANDOM_ENGINE(mt);
+ 		std::uniform_int_distribution<int> dist(0, 255);
+ 		std::array<uint8, 16> uid_data = {0, 0, 0, 0, 0, 0, 0, 0x89, 0x44, 0x00, 0xC2};
+ 		uid_data[0] = dist(mt);
+diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.cpp b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
+index 5097d6e..3202f52 100644
+--- a/src/Cafe/OS/libs/nsyshid/Skylander.cpp
++++ b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
+@@ -893,8 +893,7 @@ namespace nsyshid
+ 		{
+ 			memcpy(&data[(index * 0x40) + 0x36], &other_blocks, sizeof(other_blocks));
+ 		}
+-		std::random_device rd;
+-		std::mt19937 mt(rd());
++		CEMU_RANDOM_ENGINE(mt);
+ 		std::uniform_int_distribution<int> dist(0, 255);
+ 		data[0] = dist(mt);
+ 		data[1] = dist(mt);
+diff --git a/src/Cafe/OS/libs/nsyshid/nsyshid.cpp b/src/Cafe/OS/libs/nsyshid/nsyshid.cpp
+index 288a8d0..d0d044b 100644
+--- a/src/Cafe/OS/libs/nsyshid/nsyshid.cpp
++++ b/src/Cafe/OS/libs/nsyshid/nsyshid.cpp
+@@ -403,7 +403,7 @@ namespace nsyshid
+ 		else
+ 		{
+ 			// asynchronous
+-			std::thread(&_hidGetDescriptorAsync, device, descType, descIndex, lang, output, outputMaxLength, cbFuncMPTR, cbParamMPTR)
++			CEMU_THREAD(&_hidGetDescriptorAsync, device, descType, descIndex, lang, output, outputMaxLength, cbFuncMPTR, cbParamMPTR)
+ 				.detach();
+ 			returnCode = 0;
+ 		}
+@@ -465,7 +465,7 @@ namespace nsyshid
+ 		else
+ 		{
+ 			// asynchronous
+-			std::thread(&_hidSetIdleAsync, device, ifIndex, reportId, duration, callbackFuncMPTR, callbackParamMPTR)
++			CEMU_THREAD(&_hidSetIdleAsync, device, ifIndex, reportId, duration, callbackFuncMPTR, callbackParamMPTR)
+ 				.detach();
+ 			returnCode = 0;
+ 		}
+@@ -525,7 +525,7 @@ namespace nsyshid
+ 		else
+ 		{
+ 			// asynchronous
+-			std::thread(&_hidSetProtocolAsync, device, ifIndex, protocol, callbackFuncMPTR, callbackParamMPTR)
++			CEMU_THREAD(&_hidSetProtocolAsync, device, ifIndex, protocol, callbackFuncMPTR, callbackParamMPTR)
+ 				.detach();
+ 			returnCode = 0;
+ 		}
+@@ -608,14 +608,14 @@ namespace nsyshid
+ 			// synchronous
+ 			StackAllocator<coreinit::OSEvent> event;
+ 			coreinit::OSInitEvent(&event, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+-			std::future<sint32> res = std::async(std::launch::async, &_hidSetReportSync, device, reportType, reportId, data, dataLength, &event);
++			std::future<sint32> res = CEMU_ASYNC(&_hidSetReportSync, device, reportType, reportId, data, dataLength, &event);
+ 			coreinit::OSWaitEvent(&event);
+ 			returnCode = res.get();
+ 		}
+ 		else
+ 		{
+ 			// asynchronous
+-			std::thread(&_hidSetReportAsync, device, reportType, reportId, data, dataLength,
++			CEMU_THREAD(&_hidSetReportAsync, device, reportType, reportId, data, dataLength,
+ 						callbackFuncMPTR, callbackParamMPTR)
+ 				.detach();
+ 			returnCode = 0;
+@@ -705,7 +705,7 @@ namespace nsyshid
+ 		if (callbackFuncMPTR != MPTR_NULL)
+ 		{
+ 			// asynchronous transfer
+-			std::thread(&_hidReadAsync, device, data, maxLength, callbackFuncMPTR, callbackParamMPTR).detach();
++			CEMU_THREAD(&_hidReadAsync, device, data, maxLength, callbackFuncMPTR, callbackParamMPTR).detach();
+ 			returnCode = 0;
+ 		}
+ 		else
+@@ -713,7 +713,7 @@ namespace nsyshid
+ 			// synchronous transfer
+ 			StackAllocator<coreinit::OSEvent> event;
+ 			coreinit::OSInitEvent(&event, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+-			std::future<sint32> res = std::async(std::launch::async, &_hidReadSync, device, data, maxLength, &event);
++			std::future<sint32> res = CEMU_ASYNC(&_hidReadSync, device, data, maxLength, &event);
+ 			coreinit::OSWaitEvent(&event);
+ 			returnCode = res.get();
+ 		}
+@@ -802,7 +802,7 @@ namespace nsyshid
+ 		if (callbackFuncMPTR != MPTR_NULL)
+ 		{
+ 			// asynchronous transfer
+-			std::thread(&_hidWriteAsync, device, data, maxLength, callbackFuncMPTR, callbackParamMPTR).detach();
++			CEMU_THREAD(&_hidWriteAsync, device, data, maxLength, callbackFuncMPTR, callbackParamMPTR).detach();
+ 			returnCode = 0;
+ 		}
+ 		else
+@@ -810,7 +810,7 @@ namespace nsyshid
+ 			// synchronous transfer
+ 			StackAllocator<coreinit::OSEvent> event;
+ 			coreinit::OSInitEvent(&event, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+-			std::future<sint32> res = std::async(std::launch::async, &_hidWriteSync, device, data, maxLength, &event);
++			std::future<sint32> res = CEMU_ASYNC(&_hidWriteSync, device, data, maxLength, &event);
+ 			coreinit::OSWaitEvent(&event);
+ 			returnCode = res.get();
+ 		}
+diff --git a/src/Cafe/OS/libs/snd_core/ax.h b/src/Cafe/OS/libs/snd_core/ax.h
+index 144e0c9..0f069c9 100644
+--- a/src/Cafe/OS/libs/snd_core/ax.h
++++ b/src/Cafe/OS/libs/snd_core/ax.h
+@@ -391,6 +391,9 @@ namespace snd_core
+ 	void AXOut_init();
+ 	void AXOut_reset();
+ 	void AXOut_update();
++#if defined(CHIMERA)
++	uint64 AXOut_nextUpdate();
++#endif
+ 
+ 	COSModule* GetModuleSndCore1();
+ 	COSModule* GetModuleSndCore2();
+diff --git a/src/Cafe/OS/libs/snd_core/ax_out.cpp b/src/Cafe/OS/libs/snd_core/ax_out.cpp
+index 0d9d930..dd27695 100644
+--- a/src/Cafe/OS/libs/snd_core/ax_out.cpp
++++ b/src/Cafe/OS/libs/snd_core/ax_out.cpp
+@@ -4,6 +4,10 @@
+ #include "config/CemuConfig.h"
+ #include "Common/CafeStaticVar.h"
+ 
++#if defined(CHIMERA)
++AudioAPIPtr chimera_make_tv_audio(sint32 rate, sint32 channels, sint32 samplesPerBlock);
++#endif
++
+ namespace snd_core
+ {
+ 	uint32 numProcessedFrames = 0;
+@@ -399,6 +403,12 @@ namespace snd_core
+ 		numQueuedFramesSndGeneric = 0;
+ 
+ 		std::unique_lock lock(g_audioMutex);
++#if defined(CHIMERA)
++		// chimera: the TV's sound is the frame's (waterbox/driver/cemu/audio.cpp);
++		// the GamePad's speaker is not heard
++		if (!g_tvAudio)
++			g_tvAudio = chimera_make_tv_audio(48000, CemuConfig::AudioChannelsToNChannels(GetConfig().tv_channels), snd_core::AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP);
++#endif
+ 		if (!g_tvAudio)
+ 		{
+ 			try
+@@ -475,9 +485,41 @@ namespace snd_core
+ 		}
+ 	}
+ 
++#if defined(CHIMERA)
++	// chimera: an AX frame every 3 ms of the machine's clock (upstream: of the
++	// host's, and sooner when the host's sound device runs short)
++	uint64 s_chimeraNextAXFrame = 0;
++	constexpr uint64 kChimeraAXFrameCycles = chimera::vsched::kCoreClock * 3 / 1000;
++
++	uint64 AXOut_nextUpdate()
++	{
++		return s_chimeraNextAXFrame;
++	}
++#endif
++
+ 	// called periodically to check for AX updates
+ 	void AXOut_update()
+ 	{
++#if defined(CHIMERA)
++		{
++			const uint64 now = chimera::vsched::Now();
++			if (s_chimeraNextAXFrame == 0)
++				s_chimeraNextAXFrame = now + kChimeraAXFrameCycles;
++			if (now < s_chimeraNextAXFrame)
++				return;
++			s_chimeraNextAXFrame += kChimeraAXFrameCycles;
++			if (snd_core::isInitialized())
++			{
++				if (numQueuedFramesSndGeneric == snd_core::getNumProcessedFrames())
++				{
++					AXOut_updateDevicePlayState(true);
++					snd_core::AXIst_QueueFrame();
++					numQueuedFramesSndGeneric++;
++				}
++			}
++			return;
++		}
++#endif
+ 		constexpr static auto kTimeout = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(((IAudioAPI::kBlockCount * 3) / 4) * (AX_FRAMES_PER_GROUP * 3)));
+ 		constexpr static auto kWaitDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(3));
+ 		constexpr static auto kWaitDurationFast = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds(2900));
+diff --git a/src/Cafe/OS/libs/sysapp/sysapp.cpp b/src/Cafe/OS/libs/sysapp/sysapp.cpp
+index 82c3354..87a7635 100644
+--- a/src/Cafe/OS/libs/sysapp/sysapp.cpp
++++ b/src/Cafe/OS/libs/sysapp/sysapp.cpp
+@@ -458,7 +458,7 @@ void sysappExport__SYSReturnToCallerWithStandardResult(PPCInterpreter_t* hCPU)
+ {
+ 	ppcDefineParamU32BEPtr(resultPtr, 0);
+ 	cemuLog_log(LogType::Force, "_SYSReturnToCallerWithStandardResult(0x{:08x}) result: 0x{:08x}", hCPU->gpr[3], (uint32)*resultPtr);
+-	while (true) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++	while (true) CEMU_SLEEP_FOR(std::chrono::milliseconds(10));
+ }
+ 
+ void sysappExport__SYSGetEShopArgs(PPCInterpreter_t* hCPU)
+diff --git a/src/Cemu/FileCache/FileCache.cpp b/src/Cemu/FileCache/FileCache.cpp
+index 820115d..4035803 100644
+--- a/src/Cemu/FileCache/FileCache.cpp
++++ b/src/Cemu/FileCache/FileCache.cpp
+@@ -18,8 +18,14 @@ struct _FileCacheAsyncWriter
+ {
+ 	_FileCacheAsyncWriter()
+ 	{
++#if defined(CHIMERA)
++		// chimera: no thread of the host's; a file is written when it is
++		// given (AddJob)
++		m_isRunning.store(false);
++#else
+ 		m_isRunning.store(true);
+ 		m_fileCacheThread = std::thread(&_FileCacheAsyncWriter::FileCacheThread, this);
++#endif
+ 	}
+ 
+ 	~_FileCacheAsyncWriter()
+@@ -34,6 +40,10 @@ struct _FileCacheAsyncWriter
+ 
+ 	void AddJob(FileCache* fileCache, const FileCache::FileName& name, const uint8* fileData, sint32 fileSize)
+ 	{
++#if defined(CHIMERA)
++		fileCache->AddFile({name.name1, name.name2}, fileData, fileSize);
++		return;
++#endif
+ 		FileCacheAsyncJob async;
+ 		async.fileCache = fileCache;
+ 		async.name1 = name.name1;
+diff --git a/src/Cemu/Logging/CemuLogging.cpp b/src/Cemu/Logging/CemuLogging.cpp
+index f2d9ac0..5bb5eca 100644
+--- a/src/Cemu/Logging/CemuLogging.cpp
++++ b/src/Cemu/Logging/CemuLogging.cpp
+@@ -154,8 +154,17 @@ fs::path cemuLog_GetLogFilePath()
+     return ActiveSettings::GetUserDataPath("log.txt");
+ }
+ 
++#if defined(CHIMERA)
++// chimera: a line of the log goes to the core's driver at once (no thread),
++// stamped with the machine's time
++void chimera_log_write(std::string_view line);
++#endif
++
+ void cemuLog_createLogFile(bool triggeredByCrash)
+ {
++#if defined(CHIMERA)
++	return;
++#endif
+ 	std::unique_lock lock(LogContext.log_mutex);
+ 	if (LogContext.file_stream.is_open())
+ 		return;
+@@ -175,6 +184,21 @@ void cemuLog_createLogFile(bool triggeredByCrash)
+ 
+ void cemuLog_writeLineToLog(std::string_view text, bool date, bool new_line)
+ {
++#if defined(CHIMERA)
++	{
++		std::string line;
++		if (date)
++		{
++			const uint64 us = chimera::vsched::NowNs() / 1000;
++			line = fmt::format("[{:4d}.{:06d}] ", us / 1000000, us % 1000000);
++		}
++		line.append(text);
++		if (new_line)
++			line.push_back('\n');
++		chimera_log_write(line);
++		return;
++	}
++#endif
+ 	std::unique_lock lock(LogContext.log_mutex);
+ 
+ 	if (date)
+@@ -244,6 +268,9 @@ void cemuLog_logHexDump(LogType type, const void* data, size_t size, size_t line
+ 
+ void cemuLog_waitForFlush()
+ {
++#if defined(CHIMERA)
++	return;
++#endif
+ 	cemuLog_createLogFile(false);
+ 	std::unique_lock lock(LogContext.log_mutex);
+ 	while(!LogContext.text_cache.empty())
+diff --git a/src/Common/precompiled.h b/src/Common/precompiled.h
+index e037395..ed09667 100644
+--- a/src/Common/precompiled.h
++++ b/src/Common/precompiled.h
+@@ -85,6 +85,45 @@
+ 
+ namespace fs = std::filesystem;
+ 
++// chimera: the machine's one thread and one clock (the core's
++// waterbox/driver/include/chimera_vsched.h). Upstream's threads, locks,
++// condition variables and sleeps, where a CHIMERA build runs them as tasks
++// of one scheduler on the machine's own clock.
++#if defined(CHIMERA)
++#include "chimera_vsched.h"
++#define CEMU_THREAD chimera::Thread
++#define CEMU_MUTEX chimera::Mutex
++#define CEMU_RECURSIVE_MUTEX chimera::RecursiveMutex
++#define CEMU_CONDVAR chimera::ConditionVariable
++#define CEMU_SLEEP_FOR(d) chimera::this_task::sleep_for(d)
++#define CEMU_YIELD() chimera::this_task::yield()
++#define CEMU_ASYNC(...) chimera::Async(__VA_ARGS__)
++// the host's clocks, where upstream reads them for the machine: the
++// machine's clock (since power-on) and calendar (from the setting) instead
++int64_t chimera_clock_start();
++#define CEMU_STEADY_NOW() (std::chrono::steady_clock::time_point(std::chrono::nanoseconds(chimera::vsched::NowNs())))
++#define CEMU_SYSTEM_NOW() (std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(chimera_clock_start()) + std::chrono::nanoseconds(chimera::vsched::NowNs()))))
++// a host's random numbers make another machine every run: a fixed seed
++// instead, the same everywhere (std::random_device asks the processor)
++#define CEMU_RANDOM_SEED() (0x43454D55u)
++#define CEMU_RANDOM_ENGINE(name) static std::mt19937 name(CEMU_RANDOM_SEED())
++// the console's common key, which the user gives (ncrypto.cpp asks for it):
++// false, and zeros, when none was given
++bool chimera_common_key(uint8_t* out16);
++#else
++#define CEMU_THREAD std::thread
++#define CEMU_MUTEX std::mutex
++#define CEMU_RECURSIVE_MUTEX std::recursive_mutex
++#define CEMU_CONDVAR std::condition_variable
++#define CEMU_SLEEP_FOR(d) std::this_thread::sleep_for(d)
++#define CEMU_YIELD() std::this_thread::yield()
++#define CEMU_ASYNC(...) std::async(std::launch::async, __VA_ARGS__)
++#define CEMU_RANDOM_SEED() (std::random_device{}())
++#define CEMU_RANDOM_ENGINE(name) std::random_device name##_device; std::mt19937 name(name##_device())
++#define CEMU_STEADY_NOW() (std::chrono::steady_clock::now())
++#define CEMU_SYSTEM_NOW() (std::chrono::system_clock::now())
++#endif
++
+ #include "enumFlags.h"
+ 
+ // base types
+diff --git a/src/Common/unix/platform.cpp b/src/Common/unix/platform.cpp
+index 879ae4d..82b329d 100644
+--- a/src/Common/unix/platform.cpp
++++ b/src/Common/unix/platform.cpp
+@@ -3,7 +3,9 @@
+ 
+ uint32_t GetTickCount()
+ {
+-#if BOOST_OS_LINUX
++#if defined(CHIMERA)
++	return (uint32_t)(chimera::vsched::NowNs() / 1000000); // chimera: the machine's clock
++#elif BOOST_OS_LINUX
+ 	struct timespec ts;
+ 	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+ 	return (1000 * ts.tv_sec + ts.tv_nsec / 1000000);
+diff --git a/src/input/InputManager.cpp b/src/input/InputManager.cpp
+index 42b1db2..6ebed39 100644
+--- a/src/input/InputManager.cpp
++++ b/src/input/InputManager.cpp
+@@ -48,7 +48,9 @@ InputManager::InputManager()
+ #endif
+ 
+ 	m_update_thread_shutdown.store(false);
++#if !defined(CHIMERA) // chimera: the driver tells the controllers what is held, each frame
+ 	m_update_thread = std::thread(&InputManager::update_thread, this);
++#endif
+ }
+ 
+ InputManager::~InputManager()
+diff --git a/src/util/helpers/ConcurrentQueue.h b/src/util/helpers/ConcurrentQueue.h
+index 7cd370e..146688c 100644
+--- a/src/util/helpers/ConcurrentQueue.h
++++ b/src/util/helpers/ConcurrentQueue.h
+@@ -14,7 +14,7 @@ public:
+ 
+ 	size_t push(const T& item)
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		m_queue.push(item);
+ 		const size_t result = m_queue.size();
+ 		mlock.unlock();
+@@ -25,7 +25,7 @@ public:
+ 	template<typename ... Args>
+ 	size_t push(Args&& ... args)
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		m_queue.emplace(std::forward<Args>(args)...);
+ 		const size_t result = m_queue.size();
+ 		mlock.unlock();
+@@ -35,7 +35,7 @@ public:
+ 
+ 	T peek()
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		while (m_queue.empty())
+ 		{
+ 			m_condVar.wait(mlock);
+@@ -46,7 +46,7 @@ public:
+ 
+ 	bool peek2(T& item)
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		if (m_queue.empty())
+ 			return false;
+ 		item = m_queue.front();
+@@ -56,7 +56,7 @@ public:
+ 
+ 	T pop()
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		while (m_queue.empty())
+ 		{
+ 			m_condVar.wait(mlock);
+@@ -69,7 +69,7 @@ public:
+ 
+ 	void pop(T& item)
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		while (m_queue.empty())
+ 		{
+ 			m_condVar.wait(mlock);
+@@ -81,25 +81,25 @@ public:
+ 
+ 	void clear()
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		while (!m_queue.empty())
+ 			m_queue.pop();
+ 	}
+ 
+ 	size_t size()
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		return m_queue.size();
+ 	}
+ 
+ 	bool empty()
+ 	{
+-		std::unique_lock<std::mutex> mlock(m_mutex);
++		std::unique_lock<CEMU_MUTEX> mlock(m_mutex);
+ 		return m_queue.empty();
+ 	}
+ 
+ private:
+-	std::mutex m_mutex;
+-	std::condition_variable m_condVar;
++	CEMU_MUTEX m_mutex;
++	CEMU_CONDVAR m_condVar;
+ 	std::queue<T> m_queue;
+ };
+diff --git a/src/util/helpers/Semaphore.h b/src/util/helpers/Semaphore.h
+index 46761b8..2b1ebd5 100644
+--- a/src/util/helpers/Semaphore.h
++++ b/src/util/helpers/Semaphore.h
+@@ -41,8 +41,8 @@ public:
+ 	}
+ 
+ private:
+-	std::mutex m_mutex;
+-	std::condition_variable m_condition;
++	CEMU_MUTEX m_mutex;
++	CEMU_CONDVAR m_condition;
+ 	uint64 m_count = 0;
+ };
+ 
+@@ -118,8 +118,8 @@ public:
+ 	}
+ 
+ private:
+-	std::mutex m_mutex;
+-	std::condition_variable m_condition;
++	CEMU_MUTEX m_mutex;
++	CEMU_CONDVAR m_condition;
+ 	sint64 m_count = 0;
+ };
+ 
+@@ -165,7 +165,7 @@ public:
+ 	}
+ 
+ private:
+-	std::mutex m_mutex;
+-	std::condition_variable m_condition;
++	CEMU_MUTEX m_mutex;
++	CEMU_CONDVAR m_condition;
+ 	T m_state;
+ };
+\ No newline at end of file
+diff --git a/src/util/helpers/helpers.cpp b/src/util/helpers/helpers.cpp
+index d13a31a..4a7488b 100644
+--- a/src/util/helpers/helpers.cpp
++++ b/src/util/helpers/helpers.cpp
+@@ -115,7 +115,9 @@ typedef struct tagTHREADNAME_INFO
+ 
+ void SetThreadName(const char* name)
+ {
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	chimera::vsched::SetName(name); // chimera: threads are the scheduler's tasks
++#elif BOOST_OS_WINDOWS
+ 	using SetThreadDescription_t = HRESULT (*)(HANDLE hThread, PCWSTR lpThreadDescription);
+ 	static SetThreadDescription_t pSetThreadDescription = nullptr;
+ 	if (!pSetThreadDescription)
+@@ -415,8 +417,7 @@ std::string GenerateRandomString(const size_t length, const std::string_view cha
+ 	std::string result;
+ 	result.resize(length);
+ 
+-	std::random_device rd;
+-	std::mt19937 gen(rd());
++	CEMU_RANDOM_ENGINE(gen);
+      
+         // workaround for static asserts using boost
+         boost::random::uniform_int_distribution<decltype(characters.size())> index_dist(0, characters.size() - 1);
+diff --git a/src/util/highresolutiontimer/HighResolutionTimer.cpp b/src/util/highresolutiontimer/HighResolutionTimer.cpp
+index 6bb96a8..f9af380 100644
+--- a/src/util/highresolutiontimer/HighResolutionTimer.cpp
++++ b/src/util/highresolutiontimer/HighResolutionTimer.cpp
+@@ -2,7 +2,9 @@
+ 
+ HighResolutionTimer HighResolutionTimer::now()
+ {
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	return HighResolutionTimer(chimera::vsched::NowNs()); // chimera: the machine's clock
++#elif BOOST_OS_WINDOWS
+ 	LARGE_INTEGER pc;
+ 	QueryPerformanceCounter(&pc);
+ 	return HighResolutionTimer(pc.QuadPart);
+@@ -27,7 +29,9 @@ HRTick HighResolutionTimer::getFrequency()
+ }
+ 
+ uint64 HighResolutionTimer::m_freq = []() -> uint64 {
+-#if BOOST_OS_WINDOWS
++#if defined(CHIMERA)
++	return 1000000000;
++#elif BOOST_OS_WINDOWS
+ 	LARGE_INTEGER freq;
+ 	QueryPerformanceFrequency(&freq);
+ 	return (uint64)(freq.QuadPart);
+diff --git a/src/Cafe/IOSU/nn/boss/boss_service.cpp b/src/Cafe/IOSU/nn/boss/boss_service.cpp
+--- a/src/Cafe/IOSU/nn/boss/boss_service.cpp
++++ b/src/Cafe/IOSU/nn/boss/boss_service.cpp
+@@ -554,7 +554,7 @@
+ 			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
+ 		}
+ 
+-		std::recursive_mutex& GetMutex() { return m_mutex; }
++		CEMU_RECURSIVE_MUTEX& GetMutex() { return m_mutex; }
+ 	private:
+ 		struct NbdlQueuedFile
+ 		{
+@@ -824,7 +824,7 @@
+ 		TaskId m_taskId;
+ 		uint32 m_persistentId;
+ 		TaskSettingCore m_taskSettings;
+-		std::recursive_mutex m_mutex;
++		CEMU_RECURSIVE_MUTEX m_mutex;
+ 		TaskState m_taskState{ TaskState::Initial };
+ 		TaskTurnState m_taskTurnState{ TaskTurnState::Ukn };
+ 		sint32 m_httpStatusCode{ 0 };
+@@ -838,7 +838,7 @@
+ 		{
+ 			if (m_threadRunning.exchange(true))
+ 				return;
+-			m_bossDaemonThread = std::thread(&BossDaemon::BossDaemonThread, this);
++			m_bossDaemonThread = CEMU_THREAD(&BossDaemon::BossDaemonThread, this);
+ 		}
+ 
+ 		void Stop()
+@@ -952,7 +952,7 @@
+ 						cemu_assert_debug(task->GetState() != TaskState::Ready);
+ 					}
+ 				}
+-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
++				CEMU_SLEEP_FOR(std::chrono::milliseconds(100));
+ 			}
+ 			curl_easy_cleanup(curl);
+ 		}
+@@ -968,10 +968,10 @@
+ 			return nullptr;
+ 		}
+ 
+-		std::thread m_bossDaemonThread;
++		CEMU_THREAD m_bossDaemonThread;
+ 		std::atomic_bool m_threadRunning{ false };
+ 		// task list
+-		std::mutex m_taskMtx;
++		CEMU_MUTEX m_taskMtx;
+ 		std::map<TaskId, std::shared_ptr<RegisteredTask>> m_registeredTasks;
+ 	}s_bossDaemon;
+ 
+@@ -1137,7 +1137,7 @@
+ 			uint32 timeout = serviceCall.ReadParameter<uint32be>();
+ 			std::chrono::steady_clock::time_point endTime;
+ 			if (timeout != 0)
+-				endTime = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
++				endTime = CEMU_STEADY_NOW() + std::chrono::seconds(timeout);
+ 			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
+ 			cemu_assert_debug(registeredTask != nullptr);
+ 			if (!registeredTask)
+@@ -1145,7 +1145,7 @@
+ 			while (true)
+ 			{
+ 				// todo - make async
+-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
++				CEMU_SLEEP_FOR(std::chrono::milliseconds(100));
+ 				TaskState currentState = registeredTask->GetState();
+ 				// does the state match the wait state?
+ 				if (waitState == TaskWaitState::Done)
+@@ -1163,7 +1163,7 @@
+ 					return RESULT_SUCCESS;
+ 				}
+ 				// check for timeout
+-				if (timeout != 0 && std::chrono::steady_clock::now() >= endTime)
++				if (timeout != 0 && CEMU_STEADY_NOW() >= endTime)
+ 				{
+ 					serviceCall.WriteResponse<uint8be>(0);
+ 					return RESULT_SUCCESS; // which error to return here?
+diff --git a/src/Cafe/OS/libs/nn_idbe/nn_idbe.cpp b/src/Cafe/OS/libs/nn_idbe/nn_idbe.cpp
+--- a/src/Cafe/OS/libs/nn_idbe/nn_idbe.cpp
++++ b/src/Cafe/OS/libs/nn_idbe/nn_idbe.cpp
+@@ -68,7 +68,7 @@
+ 			StackAllocator<coreinit::OSEvent> event;
+ 			coreinit::OSInitEvent(&event, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+ 			++s_activeTaskCount;
+-			std::thread(asyncDownloadIconFile, titleId, encryptedIconData, &event).detach();
++			CEMU_THREAD(asyncDownloadIconFile, titleId, encryptedIconData, &event).detach();
+ 			coreinit::OSWaitEvent(&event);
+ 			osLib_returnFromFunction(hCPU, 1);
+ 		}
+@@ -181,7 +181,7 @@
+ 			void RPLUnmapped() override
+ 			{
+ 				while (s_activeTaskCount != 0)
+-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
++					CEMU_SLEEP_FOR(std::chrono::milliseconds(1));
+ 			}
+ 
+ 		}s_COSnnIdbeModule;
+diff --git a/src/Cafe/IOSU/ccr_nfc/iosu_ccr_nfc.cpp b/src/Cafe/IOSU/ccr_nfc/iosu_ccr_nfc.cpp
+--- a/src/Cafe/IOSU/ccr_nfc/iosu_ccr_nfc.cpp
++++ b/src/Cafe/IOSU/ccr_nfc/iosu_ccr_nfc.cpp
+@@ -12,7 +12,7 @@
+ 		IOSMsgQueueId sCCRNFCMsgQueue;
+ 		constinit IOSUStaticData s_ccrNfcStaticData;
+ 		CafeStaticVar<iosu::kernel::IOSMessage, 0x20> sCCRNFCMsgQueueMsgBuffer{s_ccrNfcStaticData};
+-		std::thread sCCRNFCThread;
++		CEMU_THREAD sCCRNFCThread;
+ 
+ 		constexpr uint8 sNfcKey[16]{}; // chimera: an NFC key is not in this program
+ 		constexpr uint8 sNfcKeyIV[16]{}; // chimera: an NFC key is not in this program
+@@ -384,7 +384,7 @@
+ 				IOS_ERROR error = iosu::kernel::IOS_RegisterResourceManager("/dev/ccr_nfc", sCCRNFCMsgQueue);
+ 				cemu_assert(!IOS_ResultIsError(error));
+ 
+-				sCCRNFCThread = std::thread(CCRNFCThread);
++				sCCRNFCThread = CEMU_THREAD(CCRNFCThread);
+ 			}
+ 
+ 			void SystemExit() override

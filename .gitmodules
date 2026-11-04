@@ -1,0 +1,3 @@
+[submodule "extern/cemu"]
+	path = extern/cemu
+	url = https://github.com/cemu-project/Cemu

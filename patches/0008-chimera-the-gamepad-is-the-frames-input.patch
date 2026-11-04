@@ -1,0 +1,83 @@
+diff --git a/src/Cafe/OS/libs/mic/mic.cpp b/src/Cafe/OS/libs/mic/mic.cpp
+index 2e7cbed..3986b36 100644
+--- a/src/Cafe/OS/libs/mic/mic.cpp
++++ b/src/Cafe/OS/libs/mic/mic.cpp
+@@ -78,7 +78,11 @@ bool mic_isConnected(uint32 drcIndex)
+ 	if( drcIndex != 0 )
+ 		return false;
+ 
++#if defined(CHIMERA)
++	return true; // chimera: the GamePad is always there
++#else
+ 	return InputManager::instance().get_vpad_controller(drcIndex) != nullptr;
++#endif
+ }
+ 
+ sint32 mic_availableSamples(uint32 drcIndex)
+@@ -196,7 +200,11 @@ void micExport_MICOpen(PPCInterpreter_t* hCPU)
+ 		return;
+ 	}
+ 	// check if DRC is connected
++#if defined(CHIMERA)
++	bool hasDRCConnected = drcIndex == 0; // chimera: the GamePad is always there
++#else
+ 	bool hasDRCConnected = InputManager::instance().get_vpad_controller(drcIndex) != nullptr;
++#endif
+ 	if( hasDRCConnected == false )
+ 	{
+ 		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_CONNECTED);
+diff --git a/src/Cafe/OS/libs/vpad/vpad.cpp b/src/Cafe/OS/libs/vpad/vpad.cpp
+index ea932be..727474b 100644
+--- a/src/Cafe/OS/libs/vpad/vpad.cpp
++++ b/src/Cafe/OS/libs/vpad/vpad.cpp
+@@ -14,6 +14,12 @@
+ #define vpadbreak()// __debugbreak();
+ #endif
+ 
++#if defined(CHIMERA)
++// chimera: the GamePad's controls are the frame's input (waterbox/driver/cemu/gamepad.cpp)
++bool chimera_gamepad_connected(sint32 channel);
++void chimera_gamepad_read(VPADStatus_t& status, const BtnRepeat& repeat);
++#endif
++
+ #define VPAD_READ_ERR_NONE			0
+ #define VPAD_READ_ERR_NO_DATA		-1
+ #define VPAD_READ_ERR_NO_CONTROLLER	-2
+@@ -236,8 +242,13 @@ namespace vpad
+ 		status->tpProcessed1.validity = VPAD_TP_VALIDITY_INVALID_XY;
+ 		status->tpProcessed2.validity = VPAD_TP_VALIDITY_INVALID_XY;
+ 
++#if defined(CHIMERA)
++		// chimera: channel 0 is the GamePad, always there; there is no second
++		if (!chimera_gamepad_connected(channel))
++#else
+ 		const auto controller = InputManager::instance().get_vpad_controller(channel);
+ 		if (!controller)
++#endif
+ 		{
+ 			// most games expect the Wii U GamePad to be connected, so even if the user has not set it up we should still return empty samples for channel 0
+ 			if(channel != 0)
+@@ -283,7 +294,11 @@ namespace vpad
+ 					vpad::g_vpad.controller_data[channel].drcLastCallTime = currentTime;
+ 				}
+ 			}
++#if defined(CHIMERA)
++			chimera_gamepad_read(*status, vpad::g_vpad.controller_data[channel].btn_repeat);
++#else
+ 			controller->VPADRead(*status, vpad::g_vpad.controller_data[channel].btn_repeat);
++#endif
+ 			if (error)
+ 				*error = VPAD_READ_ERR_NONE;
+ 			return 1;
+@@ -1134,7 +1149,11 @@ namespace vpad
+ 			if (!g_vpad.controller_data[i].sampling_callback)
+ 				continue;
+ 			
++#if defined(CHIMERA)
++			if (chimera_gamepad_connected(i))
++#else
+ 			if(const auto controller = instance.get_vpad_controller(i))
++#endif
+ 			{
+ 				cemuLog_log(LogType::InputAPI, "Calling VPADSamplingCallback({})", i);
+ 				PPCCoreCallback(g_vpad.controller_data[i].sampling_callback, i);

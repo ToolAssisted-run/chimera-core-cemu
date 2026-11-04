@@ -1,0 +1,160 @@
+{
+ "package": "cemu",
+ "effectiveTerms": "MPL-2.0 (Cemu), with permissive parts",
+ "commercialUse": "allowed, on the MPL's and the other parts' terms",
+ "note": "The built core combines this repository's integration (MIT) with Cemu, which is MPL-2.0 (its source, at the commit named here, and this repository's patches to it are the corresponding source), and the libraries it links, every one permissive. Two fonts are built into Cemu and so into the core, both under the SIL Open Font License 1.1: Lato, the stand-in Cemu gives games when the console's own fonts are not given, and Font Awesome, for the symbols of Cemu's notices. The package carries no game, no system software, no key and none of the console's fonts: the console's four shared fonts are firmware the user gives (owner, 2026-11-03). Cemu stands in for the console's system software. A library upstream carries but this core does not build (cubeb, SDL, wxWidgets, libusb, Vulkan, Metal, RapidJSON) is not listed.",
+ "components": [
+  {
+   "name": "chimera-core-cemu (integration)",
+   "license": "MIT, and Cemu's terms (MPL-2.0) for patches/",
+   "url": "https://github.com/ToolAssisted-run/chimera-core-cemu",
+   "commit": "{selfCommit}",
+   "file": "LICENSE"
+  },
+  {
+   "name": "Cemu",
+   "license": "MPL-2.0",
+   "url": "https://github.com/cemu-project/Cemu",
+   "commit": "{submodule:extern/cemu}",
+   "file": "extern/cemu/LICENSE.txt",
+   "sourceUrl": "https://github.com/cemu-project/Cemu/archive/{commit}.tar.gz"
+  },
+  {
+   "name": "ZArchive (the reader of .wua files)",
+   "license": "MIT-0",
+   "url": "https://github.com/Exzap/ZArchive",
+   "commit": "{submodule:extern/cemu/dependencies/ZArchive}",
+   "file": "extern/cemu/dependencies/ZArchive/LICENSE"
+  },
+  {
+   "name": "Dear ImGui",
+   "license": "MIT",
+   "url": "https://github.com/ocornut/imgui",
+   "commit": "{submodule:extern/cemu/dependencies/imgui}",
+   "file": "extern/cemu/dependencies/imgui/LICENSE.txt"
+  },
+  {
+   "name": "ih264d (the H.264 decoder of Android's libavc)",
+   "license": "Apache-2.0",
+   "url": "https://android.googlesource.com/platform/external/libavc",
+   "file": "extern/cemu/dependencies/ih264d/NOTICE"
+  },
+  {
+   "name": "Lato (Cemu's stand-in for the console's fonts)",
+   "license": "OFL-1.1",
+   "url": "https://www.latofonts.com/",
+   "file": "waterbox/licenses/Lato-OFL.txt"
+  },
+  {
+   "name": "Font Awesome 4.7.0",
+   "license": "OFL-1.1",
+   "url": "https://fontawesome.com/v4/",
+   "file": "waterbox/licenses/FontAwesome-OFL.txt"
+  },
+  {
+   "name": "robin_hood unordered map",
+   "license": "MIT",
+   "url": "https://github.com/martinus/robin-hood-hashing",
+   "file": "waterbox/licenses/robin_hood-LICENSE.txt"
+  },
+  {
+   "name": "flat_hash_map",
+   "license": "BSL-1.0",
+   "url": "https://github.com/skarupke/flat_hash_map",
+   "file": "waterbox/licenses/flat_hash_map-LICENSE.txt"
+  },
+  {
+   "name": "fast_float",
+   "license": "Apache-2.0 OR MIT",
+   "url": "https://github.com/fastfloat/fast_float",
+   "file": "waterbox/licenses/fast_float-LICENSE.txt"
+  },
+  {
+   "name": "date (Howard Hinnant)",
+   "license": "MIT",
+   "url": "https://github.com/HowardHinnant/date",
+   "file": "waterbox/licenses/date-LICENSE.txt"
+  },
+  {
+   "name": "MD5 (Alexander Peslyak)",
+   "license": "public domain, or a permissive licence where that is not possible, as its source says",
+   "url": "https://openwall.info/wiki/people/solar/software/public-domain-source-code/md5",
+   "file": "waterbox/licenses/md5-LICENSE.txt"
+  },
+  {
+   "name": "Khronos OpenGL headers",
+   "license": "MIT (Khronos)",
+   "url": "https://github.com/KhronosGroup/OpenGL-Registry",
+   "file": "waterbox/licenses/Khronos-headers.txt"
+  },
+  {
+   "name": "glad (the OpenGL loader of the GPU bridge's guest half)",
+   "license": "(WTFPL OR CC0-1.0) AND Apache-2.0",
+   "url": "https://github.com/Dav1dde/glad",
+   "file": "waterbox/glad/LICENSE"
+  },
+  {
+   "name": "zlib",
+   "license": "Zlib",
+   "url": "https://zlib.net/",
+   "commit": "1.3.1",
+   "file": "build/deps/obj-guest/zlib-1.3.1/LICENSE"
+  },
+  {
+   "name": "Zstandard",
+   "license": "BSD-3-Clause (offered as BSD-3-Clause OR GPL-2.0-only)",
+   "url": "https://github.com/facebook/zstd",
+   "commit": "v1.5.6",
+   "file": "build/deps/obj-guest/zstd-1.5.6/LICENSE"
+  },
+  {
+   "name": "{fmt}",
+   "license": "MIT",
+   "url": "https://github.com/fmtlib/fmt",
+   "commit": "12.1.0",
+   "file": "build/deps/obj-guest/fmt-12.1.0/LICENSE"
+  },
+  {
+   "name": "pugixml",
+   "license": "MIT",
+   "url": "https://pugixml.org/",
+   "commit": "v1.14",
+   "file": "build/deps/obj-guest/pugixml-1.14/LICENSE.md"
+  },
+  {
+   "name": "GLM",
+   "license": "MIT (or the Happy Bunny licence, as its copying.txt offers)",
+   "url": "https://github.com/g-truc/glm",
+   "commit": "1.0.1",
+   "file": "build/deps/obj-guest/glm-1.0.1/copying.txt"
+  },
+  {
+   "name": "Boost (headers)",
+   "license": "BSL-1.0",
+   "url": "https://www.boost.org/",
+   "commit": "1.86.0",
+   "file": "build/deps/obj-guest/boost_1_86_0/LICENSE_1_0.txt"
+  },
+  {
+   "name": "OpenSSL",
+   "license": "Apache-2.0",
+   "url": "https://www.openssl.org/",
+   "commit": "3.0.15",
+   "file": "build/deps/obj-guest/openssl-build/LICENSE.txt"
+  },
+  {
+   "name": "libpng",
+   "license": "libpng-2.0",
+   "url": "http://www.libpng.org/pub/png/libpng.html",
+   "commit": "1.6.44",
+   "file": "build/deps/obj-guest/libpng-1.6.44/LICENSE"
+  },
+  {
+   "name": "curl (headers only: the core makes no connection)",
+   "license": "curl",
+   "url": "https://curl.se/",
+   "commit": "8.11.1",
+   "file": "build/deps/obj-guest/curl-8.11.1/COPYING"
+  }
+ ]
+}

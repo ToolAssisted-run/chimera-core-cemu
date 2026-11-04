@@ -1,0 +1,5 @@
+build/
+minibox-diag.log
+tests/roms/
+waterbox/tests/work/
+__pycache__/
