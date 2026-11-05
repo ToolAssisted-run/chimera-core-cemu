@@ -125,7 +125,9 @@ jobs:
           path: |
             build/deps
             build/dl
-          key: deps-gcc14-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/fetch-devkitpro.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}
+          # and miniBox's guest flags key it too (its meson.build and musl specs; the
+          # submodule's .git is a pointer file whose hash never changes)
+          key: deps-gcc14-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/fetch-devkitpro.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/meson.build', 'chimera-checkout/extern/chimera-common-minibox/extern/musl/tools/musl-gcc.specs.sh') }}
 
       - name: Build the native reference
         env:
