@@ -25,6 +25,9 @@
  *                       the same way, mii_resource "console"; without it
  *                       "none"
  *   --dlc ZIP, --key F  a NUS game's add-on content, and the common key
+ *   --packs ZIP         a zip of Cemu's graphic packs, in the Graphic Packs
+ *                       slot, mounted under its own name (repeatable: the
+ *                       slot's order is the order given)
  *   --screenshot F=PATH the picture after frame F, as a TGA
  *   --rerecord          a state saved and loaded before every frame (run-wbx)
  *   --save-state FILE   the machine after the last frame (run-wbx)
@@ -64,6 +67,7 @@
 #define HARNESS_MAX_INPUT 4096
 #define HARNESS_MAX_SETS 16
 #define HARNESS_AXES 6
+#define HARNESS_MAX_PACKS 8
 
 struct harness_opts {
 	const char *program, *work;
@@ -73,8 +77,9 @@ struct harness_opts {
 	int rerecord, log, timeout;
 	uint64_t stall_frame, stall_ms, new_context;
 	const char *input, *save_state, *load_state, *dump_ram, *fonts, *savedata, *savedata_out, *dlc, *key, *mii;
-	int shots, sets;
+	int shots, sets, packs;
 	const char *set[HARNESS_MAX_SETS];
+	const char *pack[HARNESS_MAX_PACKS];
 	uint64_t shot_frame[HARNESS_MAX_SHOTS];
 	const char *shot_path[HARNESS_MAX_SHOTS];
 };
@@ -131,6 +136,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		else if (!strcmp(a, "--savedata") && i + 1 < argc) o->savedata = argv[++i];
 		else if (!strcmp(a, "--savedata-out") && i + 1 < argc) o->savedata_out = argv[++i];
 		else if (!strcmp(a, "--dlc") && i + 1 < argc) o->dlc = argv[++i];
+		else if (!strcmp(a, "--packs") && i + 1 < argc && o->packs < HARNESS_MAX_PACKS) o->pack[o->packs++] = argv[++i];
 		else if (!strcmp(a, "--key") && i + 1 < argc) o->key = argv[++i];
 		else if (!strcmp(a, "--mii") && i + 1 < argc) o->mii = argv[++i];
 		else if (!strcmp(a, "--rerecord")) o->rerecord = 1;
@@ -156,7 +162,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 	if (!o->program || !o->work) {
 		fprintf(stderr, "usage: %s <program> --work <dir> [--frames N] [--every N] [--cpu interpreter|recompiler]"
 			" [--clock-start S] [--input FILE] [--screenshot F=PATH]... [--rerecord] [--save-state FILE]"
-			" [--state FILE] [--dump-ram FILE] [--log] [--timeout S] [--dlc ZIP] [--key FILE] [--mii DIR]\n", argv[0]);
+			" [--state FILE] [--dump-ram FILE] [--log] [--timeout S] [--dlc ZIP] [--key FILE] [--mii DIR] [--packs ZIP]...\n", argv[0]);
 		return 0;
 	}
 	return 1;
@@ -213,14 +219,17 @@ static const char *const harness_mii_names[] = { "FFLResHigh.dat", "FFLResHighLG
 /* The console's fonts, the names they are mounted under. */
 static const char *const harness_font_names[4] = { "CafeCn.ttf", "CafeKr.ttf", "CafeStd.ttf", "CafeTw.ttf" };
 
-/* The slot map a project would mount. */
-static void harness_slots(const char *game, const char *savedata, const char *dlc, char *buf, size_t n)
+/* The slot map a project would mount; packs names the graphic packs' zips
+ * (npacks of them), by the names they are mounted under. */
+static void harness_slots(const char *game, const char *savedata, const char *dlc, const char *const *packs, int npacks, char *buf, size_t n)
 {
 	int at = snprintf(buf, n, "{\"game\": [\"%s\"]", game);
 	if (savedata && at > 0 && (size_t)at < n)
 		at += snprintf(buf + at, n - (size_t)at, ", \"savedata\": [\"%s\"]", savedata);
 	if (dlc && at > 0 && (size_t)at < n)
 		at += snprintf(buf + at, n - (size_t)at, ", \"dlc\": [\"%s\"]", dlc);
+	for (int i = 0; i < npacks && at > 0 && (size_t)at < n; i++)
+		at += snprintf(buf + at, n - (size_t)at, "%s\"%s\"%s", i == 0 ? ", \"graphicpacks\": [" : ", ", packs[i], i == npacks - 1 ? "]" : "");
 	if (at > 0 && (size_t)at < n)
 		snprintf(buf + at, n - (size_t)at, "}");
 }

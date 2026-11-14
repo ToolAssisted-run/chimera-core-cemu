@@ -849,6 +849,77 @@ else
 	fi
 fi
 
+# Cemu's graphic packs, from the Graphic Packs slot (docs/PLAN.md, "Graphic
+# packs"). The packs are this repository's own, written now by
+# tests/make-packs.py: for the frames title, a patch that makes the frames
+# program's alarm count by the pack's $step (its presets: 2 first, 3 marked
+# default, 1 in [Default]) and an output shader that turns the picture's
+# colours over; and, in the same zip, a pack for another title that would
+# count by 100.
+#
+# packs:applied, natively: with the zip, the alarm counts by 3 (upstream's
+# default preset), so its count is 3 times the count without, and nothing
+# else of the mailbox changes; a point of the picture is the colour without,
+# turned over; with the other title's pack alone the run is the run without
+# packs, line for line; a zip with no rules.txt, and a file that is no zip,
+# are refused with the reason's key.
+# packs:sandbox: the sandbox with the packs is the native run with them; a
+# state saved and loaded before every frame, and a new GPU context before
+# every frame natively, change nothing (the output shader is made again on
+# the new context).
+packs_elf="$root/build/homebrew/obj/frames.elf"
+packs_dkp="$root/build/devkitpro"
+if [ -n "${DEVKITPRO:-}" ] && [ -x "$DEVKITPRO/devkitPPC/bin/powerpc-eabi-objdump" ]; then packs_dkp="$DEVKITPRO"; fi
+packs_objdump="$packs_dkp/devkitPPC/bin/powerpc-eabi-objdump"
+have_packs=0
+if [ "$have_native" = 0 ]; then
+	report "packs:applied" SKIP "$why_native"
+elif [ ! -f "$frames_wua" ] || [ ! -f "$packs_elf" ] || [ ! -x "$packs_objdump" ]; then
+	report "packs:applied" SKIP "needs build/homebrew/frames.wua, build/homebrew/obj/frames.elf and devkitPPC's objdump: run waterbox/build-homebrew.sh and waterbox/build-test-titles.sh"
+elif ! made="$(python3 -I "$here/tests/make-packs.py" "$packs_elf" "$packs_objdump" "$work" 2>&1)"; then
+	report "packs:applied" FAIL "the test packs were not made: $made"
+else
+	have_packs=1
+	pf=300
+	native gp0 "$frames_wua" --frames "$pf" --every 60 --screenshot "$pf=$work/gp0.tga"
+	native gp1 "$frames_wua" --frames "$pf" --every 60 --packs "$work/alarm.zip" --screenshot "$pf=$work/gp1.tga" --log
+	native gpo "$frames_wua" --frames "$pf" --every 60 --packs "$work/other.zip"
+	native gpn "$frames_wua" --frames 1 --every 1 --packs "$work/norules.zip"
+	native gpz "$frames_wua" --frames 1 --every 1 --packs "$work/notzip.zip"
+	# the mailbox without its sixth value (the alarm's count), and that value
+	rest() { field "$1" "$2" mailbox | cut -d/ -f1-5,7-; }
+	alarms0="$(mailbox "$work/gp0.out" "$pf" 6)"; alarms1="$(mailbox "$work/gp1.out" "$pf" 6)"
+	same_rest=1
+	for f in $(seq 60 60 "$pf"); do [ "$(rest "$work/gp0.out" "$f")" = "$(rest "$work/gp1.out" "$f")" ] || same_rest=0; done
+	px0="$(python3 "$here/tests/pixel.py" "$work/gp0.tga" 640,400 2> /dev/null)"
+	px1="$(python3 "$here/tests/pixel.py" "$work/gp1.tga" 640,400 2> /dev/null)"
+	turned="$(printf '%06x' $((0xFFFFFF - 0x${px0:-0})))"
+	refused="$(grep -a -c 'Init failed: error.packs_no_rules.norules.zip' "$work/gpn.err")/$(grep -a -c 'Init failed: error.packs_not_zip.notzip.zip' "$work/gpz.err")"
+	activated="$(grep -a -c 'Activate graphic pack: Chimera/Tests/Alarm \[Presets: Three\]' "$work/gp1.err")/$(grep -a -c 'Activate graphic pack: Chimera/Tests/Other' "$work/gp1.err")"
+	if whole "$work/gp0.out" "$pf" && whole "$work/gp1.out" "$pf" && [ "${alarms0:-0}" -gt 0 ] && [ "${alarms1:-0}" = $((3 * alarms0)) ] &&
+		[ "$same_rest" = 1 ] && [ -n "$px1" ] && [ "$px1" = "$turned" ] && [ "$px1" != "$px0" ] && cmp -s "$work/gp0.out" "$work/gpo.out" &&
+		[ "$refused" = "1/1" ] && [ "$activated" = "1/0" ]; then
+		report "packs:applied" PASS "the alarm counted $alarms1 with the pack, $alarms0 without (preset Three, x3); the picture's colours turned over ($px0 -> $px1); another title's pack changes nothing; refusals: $refused"
+	else
+		report "packs:applied" FAIL "alarms with [$alarms1] without [$alarms0]; rest the same: $same_rest; pixel [$px0] -> [$px1] want [$turned]; other title the same: $(cmp -s "$work/gp0.out" "$work/gpo.out" && echo yes || echo no); refused $refused; activated $activated $(tail -1 "$work/gp1.err")"
+	fi
+fi
+if [ "$have_packs" = 0 ]; then
+	report "packs:sandbox" SKIP "needs packs:applied's runs"
+elif [ "$have_sandbox" = 0 ]; then
+	report "packs:sandbox" SKIP "$why_sandbox"
+else
+	native gpc "$frames_wua" --frames "$pf" --every 60 --packs "$work/alarm.zip" --new-context 1
+	sandbox wgp "$frames_wua" --frames "$pf" --every 60 --packs "$work/alarm.zip"
+	sandbox wgpr "$frames_wua" --frames 120 --every 60 --packs "$work/alarm.zip" --rerecord
+	if cmp -s "$work/gp1.out" "$work/wgp.out" && cmp -s "$work/gp1.out" "$work/gpc.out" &&
+		[ "$(sed -n 2p "$work/wgpr.out")" = "$(sed -n 2p "$work/gp1.out")" ] && whole "$work/wgpr.out" 120; then
+		report "packs:sandbox" PASS "with the packs, the sandbox is the native run ($pf frames); a new GPU context before every frame and a state before each of 120 frames change nothing"
+	else
+		report "packs:sandbox" FAIL "native [$(last "$work/gp1.out")] sandbox [$(last "$work/wgp.out")] new contexts [$(last "$work/gpc.out")] rerecord [$(last "$work/wgpr.out")] $(tail -1 "$work/wgpr.err")"
+	fi
+fi
+
 # The texts. Names are never translated or bent (Chimera's owner,
 # 2026-10-31): Cemu, Wii U, GamePad and the rest stay as written in all 26
 # language tables (waterbox/tests/check-names.py).

@@ -175,7 +175,14 @@ int main(int argc, char **argv)
 		wbx_mount_file_path(g_host, harness_key_name, o.key, &r);
 		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", o.key, r.error_message); return 1; }
 	}
-	harness_slots(base, o.savedata ? harness_base(o.savedata) : NULL, o.dlc ? harness_base(o.dlc) : NULL, slots, sizeof slots);
+	/* the graphic packs' zips, each under its own name */
+	const char *pack_names[HARNESS_MAX_PACKS];
+	for (int i = 0; i < o.packs; i++) {
+		pack_names[i] = harness_base(o.pack[i]);
+		wbx_mount_file_path(g_host, pack_names[i], o.pack[i], &r);
+		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", o.pack[i], r.error_message); return 1; }
+	}
+	harness_slots(base, o.savedata ? harness_base(o.savedata) : NULL, o.dlc ? harness_base(o.dlc) : NULL, pack_names, o.packs, slots, sizeof slots);
 	harness_settings(&o, settings, sizeof settings);
 	if (!mount_text("slots", slots) || !mount_text("settings", settings)) return 1;
 	wbx_activate_host(g_host, &r);

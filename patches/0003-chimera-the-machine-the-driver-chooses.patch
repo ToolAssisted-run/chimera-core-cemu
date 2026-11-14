@@ -1,13 +1,45 @@
 diff --git a/src/Cafe/GraphicPack/GraphicPack2.cpp b/src/Cafe/GraphicPack/GraphicPack2.cpp
-index 850fb6b..6864fd9 100644
+index 850fb6b..9ff1d49 100644
 --- a/src/Cafe/GraphicPack/GraphicPack2.cpp
 +++ b/src/Cafe/GraphicPack/GraphicPack2.cpp
-@@ -246,6 +246,9 @@ void GraphicPack2::ClearGraphicPacks()
+@@ -14,6 +14,22 @@
+ #include "Cafe/HW/Latte/Renderer/Renderer.h"
+ #include "Cafe/HW/Latte/Renderer/RendererOuputShader.h"
+ #include <cinttypes>
++#if defined(CHIMERA)
++#include "chimera_vsched.h"
++
++// chimera: the output shaders were made in the GPU context that has gone
++// (LatteThread_chimeraRemakeRenderer): let go of them, and they are made
++// again from their sources when next asked for
++void GraphicPack2::ChimeraForgetOutputShaders()
++{
++	m_output_shader.reset();
++	m_upscaling_shader.reset();
++	m_downscaling_shader.reset();
++	m_output_shader_ud.reset();
++	m_upscaling_shader_ud.reset();
++	m_downscaling_shader_ud.reset();
++}
++#endif
+ 
+ std::vector<GraphicPackPtr> GraphicPack2::s_graphic_packs;
+ std::vector<GraphicPackPtr> GraphicPack2::s_active_graphic_packs;
+@@ -246,6 +262,18 @@ void GraphicPack2::ClearGraphicPacks()
  
  void GraphicPack2::WaitUntilReady()
  {
 +#if defined(CHIMERA)
-+	return; // chimera: no graphic packs are loaded (they change the game)
++	// chimera: the GPU waits on the machine's clock until the packs of the
++	// title are activated (ActivateForCurrentTitle). With no pack for the
++	// title (a project gives none, or none that names this title) there is
++	// nothing to wait for, and the run is the one it was without packs.
++	const uint64 titleId = CafeSystem::GetForegroundTitleId();
++	if (std::none_of(s_graphic_packs.begin(), s_graphic_packs.end(),
++		[titleId](const GraphicPackPtr& gp) { return gp->IsEnabled() && gp->ContainsTitleId(titleId); }))
++		return;
++	chimera::vsched::Wait([]() { return s_isReady.load(); });
++	return;
 +#endif
  	while (!s_isReady)
  		std::this_thread::sleep_for(std::chrono::milliseconds(5));

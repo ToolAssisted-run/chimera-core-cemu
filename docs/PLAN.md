@@ -48,6 +48,11 @@ renderer setting the window looks for; see below).
   The Windows recompiler crash is looked into first; if it is in miniBox's
   Windows fault handling of code made at run time, it goes to the owner as
   a miniBox question with the evidence, and miniBox is not changed here.
+- (user-decided, 2026-11-14) Graphic packs (chimera issue 585): "A Graphic
+  Packs project slot: in the Cemu core, a project slot that takes zipped
+  packs, applied at power-on and part of the machine, so a movie replays
+  with them. The user brings the packs; nothing is downloaded. No change
+  to Chimera itself." Below, "Graphic packs".
 - (user-decided, 2026-11-03) A Wii U game for local tests comes from the
   owner. Until then the tests are this repository's own programs. A game is
   copied (never linked) to ~/core-content/cemu with a line in
@@ -242,8 +247,9 @@ ran on. The console's time base, `OSGetTime`, alarms, the IOS timers,
 - **The calendar** is the project's (seconds since 1970, UTC; the console's
   time zone is UTC), not the host's.
 - Cemu's log is written as it happens (no thread), stamped with the
-  machine's time; the input poller thread and the graphic packs are not
-  started.
+  machine's time; the input poller thread is not started, and no graphic
+  pack was loaded (since 2026-11-14 a project can give packs: "Graphic
+  packs", below).
 
 **What two runs found that one could not.**
 
@@ -1320,3 +1326,145 @@ card ("4.6.0 NVIDIA 581.42"), both screens showed the SpotPass notice that
 follows the title screen, and TAStudio showed the presses. The window
 played it at about 7 frames a second, keeping a state of every frame.
 Not compared with Linux, frame by frame, in this run.
+
+## Graphic packs (2026-11-14)
+
+Owner's decision (user-decided, 2026-11-14), chimera issue 585: a project
+slot for Cemu's graphic packs, zipped, applied at power-on and part of the
+machine, so that a movie replays with them; the user brings the packs and
+nothing is downloaded; no change to Chimera itself.
+
+**What a graphic pack is.** A folder the Cemu community shares, with a
+`rules.txt`: a `[Definition]` section (the title ids it is for, its name,
+its version), optional `[Preset]` sections (choices such as a resolution),
+`[TextureRedefine]` sections (render targets made larger or smaller),
+patch files `patch_*.asm` (changes to the game's code, applied when the
+game's code is loaded), shaders that replace the game's, an output shader,
+and `content/`, `aoc/` and `code/` folders whose files replace the game's.
+Upstream finds them under `graphicPacks` in its data folder (and offers to
+download the community's collection from GitHub; this core has no such
+code, and no list of packs).
+
+**The slot.** `graphicpacks`, "Graphic packs", in `file_slots.json`: any
+number of zips (`min` 0, `max` -1, format `zip`), each holding one or more
+pack folders, each with its `rules.txt` (at the zip's root or at any depth,
+as upstream searches its folder). Its help text says what a pack is and
+that it becomes part of the machine. A project records each zip as it
+records any slot's file: its name and SHA-1, in the project's manifest, so
+a movie made with packs asks for the same zips, byte for byte.
+
+**How they are applied** (`waterbox/driver/cemu/graphicpacks.cpp`). Before
+the console starts, each zip's entries are put under
+`graphicPacks/000`, `001`, ... in Cemu's data folder in the machine's
+filesystem, one folder a zip in the slot's order: an entry stored
+uncompressed is read straight from the zip (grafted, so no state carries
+it); a compressed one is unpacked into the machine (so it is in every
+state), and one of more than 64 MiB is refused with a text that says to
+store it uncompressed. Then upstream's own `GraphicPack2::LoadAll` loads
+every pack it finds there, in name order, and the core turns every one on
+(upstream turns on those its settings name). When Cemu starts the title it
+activates, as it does upstream (`ActivateForCurrentTitle`), each pack that
+names the title (or names every title, `titleIds = *`): the patches are
+applied to the game's code before it runs, the `[RAM]` mappings are made,
+the shaders and texture rules take effect.
+
+**The preset rule.** No preset is ever chosen by the project, so each pack
+runs with what upstream gives a pack the user has never set: in each
+category of presets, the preset marked `default = 1`, or else the first
+one in `rules.txt`; for packs of version 5 and later, if that preset is
+hidden by its `condition`, the first visible one of the category (or the
+visible one marked default). This is upstream's `GraphicPack2` constructor
+and `ValidatePresetSelections` with an empty settings entry. A setting per
+pack for its preset is not offered: it would need a setting whose values
+come from the project's files, which Chimera's settings do not have.
+
+**Part of the machine.** A patch changes the game's code, so a pack is as
+much the machine as the game is: the packs are given before power-on and
+cannot be changed while the console runs. Everything upstream keeps of a
+pack (the parsed rules, the patches, the code caves, which are in the
+console's memory) is in the machine's memory, so a state carries it. Two
+changes to upstream (patch 0003, and 0004 for the header and the GPU's
+loop):
+
+- The GPU waits on the machine's clock, as upstream waits on the host's,
+  until the title's packs are activated (`GraphicPack2::WaitUntilReady`),
+  so texture rules are known before the first frame. When no pack names
+  the title there is nothing to wait for and it does not wait, so a run
+  without packs, or with packs for other titles only, is the run it was
+  before this slot.
+- An output shader of a pack (`output.glsl` and the scaling ones) is a GPU
+  object; when a state is loaded into a new GPU context the renderer is
+  made again (above, M3), and now the packs' output shaders are let go of
+  too and made again from their sources.
+
+**What a pack cannot do here.**
+
+- `[Control] vsyncFrequency` (the frame-rate packs' way to change the
+  vertical blank): ignored. The vertical blank is the machine's, 59.94 Hz,
+  on its own clock (patch 0004), and a pack does not change it. Patches of
+  such a pack still apply.
+- `rendererFilter = vulkan` or `metal`: not activated (the core draws with
+  OpenGL), as upstream does with another renderer.
+- `vendorFilter` (a pack for one maker's cards): activated only on that
+  maker's card, as upstream does. Such packs are fixes for one maker's
+  driver; a movie made with one may need the same maker's card to replay.
+- Upstream's window shows a pack's patch errors in a dialog; here they go
+  to Cemu's log, and the pack runs without the patches that failed, as
+  upstream's does after the dialog.
+
+
+**Measured** (2026-11-14, jaffanator01, in the chimera-dev container, GCC
+14.2, on Mesa's llvmpipe: software GL, not a real card). The test packs
+are this repository's own, written by `waterbox/tests/make-packs.py` when
+the tests run: for the frames title, a patch that makes the frames
+program's alarm count by the preset variable `$step` (presets "Two" = 2
+first, "Three" = 3 marked `default = 1`, `[Default]` 1) and an output
+shader that turns the picture's colours over; and a pack for another
+title (00050000-10145C00) that would count by 100.
+
+- packs:applied (run-gate.sh): 300 frames of frames.wua with the zip: the
+  alarm counted 300 against 100 without (preset Three), every other value
+  of the program's record the same at every 60th frame; a point of the
+  picture a20e7a without, 5df185 with (each channel turned over); the
+  other title's pack alone gives the run without packs, line for line; a
+  zip with no rules.txt and a file that is no zip are refused with their
+  keys. Cemu's log: "Activate graphic pack: Chimera/Tests/Alarm [Presets:
+  Three]", and the other title's pack not activated.
+- packs:sandbox: the sandbox with the zip is the native run (300 frames,
+  every line, picture included); a new GPU context before every frame
+  natively, and a state saved and loaded before each of 120 frames in the
+  sandbox, change nothing.
+- engine:packs (run-frontend.sh, Chimera's chimera-run on main): a project
+  of frames.wua with the zip in the slot: MEM2 and the picture at frame 180
+  are the sandbox runner's, the alarm counted 180 against 60; a state
+  around every frame, and the state after frame 90 carried into another
+  process, end the same; the project names alarm.zip in the slot
+  graphicpacks by its SHA-1.
+- Without packs, the run is the one before this change: seven runs of the
+  native reference built from the commit before and from this one (the
+  frames program as .wua and .rpx for 300 frames, with the recompiler too,
+  the pad program with its input script, the draw and readback programs,
+  profiled.wua) print the same lines, clock, task switches, memory and
+  picture. With the pack the clock is the same and the GPU's wait adds two
+  task switches.
+- The whole run-gate.sh: 31 passed, 3 skipped (firmware:fonts,
+  firmware:mii, nus:game: no such files given), and texts:chimera failed
+  only because the new source file was not yet known to git (the check
+  copies git's files); with it added, the same check passes (114 keys).
+  The whole run-frontend.sh: 9 passed, 3 skipped (engine:nus,
+  engine:fonts, engine:mii), and engine:packs failed on a mistake of the
+  test's own (it read the project's manifest wrongly); fixed, it passed
+  when run again on the final build, with packs:applied and packs:sandbox.
+- Seen to fail, on purpose, once each: the first preset chosen instead of
+  upstream's default and a wrong key for a zip with no rules.txt
+  (packs:applied: 200 counted, refusals 0/1); upstream's title filter
+  switched off and the output shader left out of the test pack
+  (packs:applied: the other title's pack changed the run, 10000 counted,
+  the picture not turned over); the packs' output shaders kept across a
+  new GPU context (packs:sandbox: the picture differs from the straight
+  run's); the slot taken out of the package (engine:packs: chimera-run
+  refuses the project, "file 'alarm.zip' fills slot 'graphicpacks', which
+  this core does not declare").
+
+Not tried: a community pack, a commercial game with a pack, a real
+graphics card, Windows.

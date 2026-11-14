@@ -469,5 +469,59 @@ else
 	report "engine:savedata" FAIL "exported [$written] ($(meta e1 status) $(meta e1 detail)); read back [$read_back] ($(meta e2 status) $(meta e2 detail) $(tail -1 "$work/saves2.new.log"))"
 fi
 
+# ---- Cemu's graphic packs through a project: the zip of this repository's
+# own test packs (tests/make-packs.py) in the Graphic Packs slot of a project
+# of frames.wua. The engine's run is the sandbox runner's with the same zip
+# (MEM2 and the picture), the frames program's alarm counted by 3 (the
+# pack's default preset) against the run without; a state around every
+# frame, and the state after frame 90 carried into another process (whose
+# project has the same pack), end with the straight run; the project names
+# the zip in that slot by its SHA-1.
+packs_elf="$hb/obj/frames.elf"
+packs_dkp="$root/build/devkitpro"
+if [ -n "${DEVKITPRO:-}" ] && [ -x "$DEVKITPRO/devkitPPC/bin/powerpc-eabi-objdump" ]; then packs_dkp="$DEVKITPRO"; fi
+if [ ! -f "$packs_elf" ] || [ ! -x "$packs_dkp/devkitPPC/bin/powerpc-eabi-objdump" ]; then
+	report "engine:packs" SKIP "needs build/homebrew/obj/frames.elf and devkitPPC's objdump (waterbox/build-homebrew.sh)"
+elif ! made="$(python3 -I "$here/tests/make-packs.py" "$packs_elf" "$packs_dkp/devkitPPC/bin/powerpc-eabi-objdump" "$work" 2>&1)"; then
+	report "engine:packs" FAIL "the test packs were not made: $made"
+else
+	gpf=180
+	movie /dev/null $gpf "$work/gp.movie"
+	tail -n +91 "$work/gp.movie" > "$work/gprest.movie"
+	for p in gp gprest; do
+		mkdir -p "$work/$p"; cp "$hb/frames.wua" "$work/alarm.zip" "$work/$p/"
+		"$runner" --new-project "$work/$p/$p.chimeraProject" "$package" "$work/$p/frames.wua" "$work/$p.movie" \
+			--file "graphicpacks=$work/$p/alarm.zip" --settings '{"cpu_mode": "interpreter", "console_fonts": "standin", "mii_resource": "none"}' > "$work/$p.new.log" 2>&1
+	done
+	run_project gp g1 --frames $gpf --dump "MEM2=$work/g1.mem2" --final-screenshot "$work/g1.tga"
+	run_project gp g2 --frames $gpf --rerecord --dump "MEM2=$work/g2.mem2" --final-screenshot "$work/g2.tga"
+	run_project gp g3 --frames 90 --save-state "89=$work/g3.state"
+	run_project gprest g4 --state "$work/g3.state" --frames $((gpf - 90)) --dump "MEM2=$work/g4.mem2" --final-screenshot "$work/g4.tga"
+	run_wbx wg "$hb/frames.wua" --frames $gpf --every $gpf --packs "$work/alarm.zip" --dump-ram "$work/wg.ram" --screenshot "$gpf=$work/wg.tga"
+	run_wbx wg0 "$hb/frames.wua" --frames $gpf --every $gpf --dump-ram "$work/wg0.ram"
+	mem2_of "$work/wg.ram" "$work/wg.mem2" 2> /dev/null
+	mem2_of "$work/wg0.ram" "$work/wg0.mem2" 2> /dev/null
+	pic_g1="$(python3 "$here/tests/picture.py" "$work/g1.tga" 2> /dev/null)"
+	pic_g2="$(python3 "$here/tests/picture.py" "$work/g2.tga" 2> /dev/null)"
+	pic_g4="$(python3 "$here/tests/picture.py" "$work/g4.tga" 2> /dev/null)"
+	pic_wg="$(python3 "$here/tests/picture.py" "$work/wg.tga" 2> /dev/null)"
+	alarms="$(mailbox_of "$work/g1.mem2" | cut -d/ -f6)"; alarms0="$(mailbox_of "$work/wg0.mem2" | cut -d/ -f6)"
+	sha="$(sha1sum "$work/alarm.zip" | cut -c1-40)"
+	named="$(python3 - "$work/gp/gp.chimeraProject" "$sha" <<'PY' 2> /dev/null
+import json, sys, zipfile
+files = json.loads(zipfile.ZipFile(sys.argv[1]).read("project.json"))["files"]
+print("yes" if any(f["slot"] == "graphicpacks" and f["name"] == "alarm.zip" and f["sha1"].lower() == sys.argv[2] for f in files) else "no")
+PY
+)"
+	if [ "$(meta g1 frames)" = $gpf ] && same_file "$work/g1.mem2" "$work/wg.mem2" && [ -n "$pic_g1" ] && [ "$pic_g1" = "$pic_wg" ] &&
+		[ "${alarms0:-0}" -gt 0 ] && [ "${alarms:-0}" = $((3 * alarms0)) ] &&
+		same_file "$work/g1.mem2" "$work/g2.mem2" && [ "$pic_g2" = "$pic_g1" ] &&
+		same_file "$work/g1.mem2" "$work/g4.mem2" && [ "$pic_g4" = "$pic_g1" ] && [ "$named" = yes ]; then
+		report "engine:packs" PASS "a project with the packs: MEM2 and the picture are the runner's; the alarm counted $alarms ($alarms0 without); a state around every frame and one carried into another process end the same; the zip is in the project by its SHA-1"
+	else
+		report "engine:packs" FAIL "frames $(meta g1 frames) $(meta g1 status) $(meta g1 detail); MEM2 $(cmp "$work/g1.mem2" "$work/wg.mem2" 2>&1 | head -1); picture [$pic_g1] [$pic_wg]; alarms [$alarms] without [$alarms0]; rerecord $(cmp -s "$work/g1.mem2" "$work/g2.mem2" && echo same || echo differs) [$pic_g2]; carried $(meta g4 status) $(cmp -s "$work/g1.mem2" "$work/g4.mem2" && echo same || echo differs) [$pic_g4]; named $named $(tail -1 "$work/gp.new.log")"
+	fi
+fi
+
 echo "$ok passed, $failed failed, $skipped skipped"
 [ "$failed" -eq 0 ]

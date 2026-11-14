@@ -31,7 +31,11 @@ computer's graphics card.
   the console's own (system title 0005001b-10042400). Without them, the
   default, games are given Cemu's free stand-in font (Lato).
 
-A project can start from saved games, as Export Save Data writes them.
+A project can start from saved games, as Export Save Data writes them, and
+can hold Cemu's graphic packs, as zips of pack folders: each pack that names
+the game is turned on at power-on with its default preset, and becomes part
+of the machine, so a movie made with packs needs the same packs. Nothing is
+downloaded; bring the packs yourself.
 
 ## Status
 

@@ -9,6 +9,7 @@
 #include "memfs.h"
 #include "gl-bridge.h"
 #include "chimera_gpu.h"
+#include "chimera_graphicpacks.h"
 #include "chimera_input.h"
 #include "chimera_nus.h"
 #include "chimera_profiles.h"
@@ -548,6 +549,17 @@ namespace chimera
 		// Cemu's per-game profiles, in its data folder, where it reads the
 		// one of the title it runs (gameProfiles/default/<title id>.ini)
 		WriteGameProfiles(user + "/gameProfiles/default");
+		// the project's graphic packs, where upstream keeps its own
+		// (graphicPacks in its data folder): a folder for each zip, named
+		// by its place in the slot, so that they load in the slot's order
+		for (size_t i = 0; i < options.graphicPacks.size(); i++)
+		{
+			char folder[16];
+			snprintf(folder, sizeof folder, "/%03zu", i);
+			std::string packError;
+			if (!MountGraphicPacks(options.graphicPacks[i].first, options.graphicPacks[i].second, user + "/graphicPacks" + folder, packError))
+				return packError;
+		}
 		memfs::mkdirs(std::string(memfs::ROOT) + "/game");
 		const std::string base = options.game.substr(options.game.find_last_of('/') + 1);
 		std::string game = std::string(memfs::ROOT) + "/game/" + base;
@@ -592,6 +604,11 @@ namespace chimera
 		ActiveSettings::Init();
 		// the console's language (System Settings), which games ask for
 		GetConfig().console_language.SetValue((CafeConsoleLanguage)options.consoleLanguage);
+		// the packs loaded and turned on before the title is prepared (its
+		// memory map reads the packs' [RAM] sections); Cemu activates those
+		// of the title when it starts it (CafeSystem's ActivateForCurrentTitle)
+		if (!options.graphicPacks.empty())
+			LoadGraphicPacks();
 		WindowSystem::Create();
 		AES128_init();
 		PPCTimer_init();

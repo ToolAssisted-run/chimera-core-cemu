@@ -9,6 +9,7 @@
 // gigabyte would make it part of every state.
 // SPDX-License-Identifier: MIT
 #include "chimera_nus.h"
+#include "chimera_zip.h"
 #include "memfs.h"
 
 #include <zlib.h>
@@ -28,6 +29,16 @@ namespace
 {
 	constexpr uint64_t kUnpackMost = 16u << 20; // a compressed entry unpacked into the machine, at most
 
+	std::string Lower(std::string s)
+	{
+		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+		return s;
+	}
+}
+
+// The zip reader, which the graphic packs' slot uses too (graphicpacks.cpp)
+namespace chimera::zip
+{
 	uint16_t le16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 	uint32_t le32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
 	uint64_t le64(const uint8_t* p) { return le32(p) | uint64_t(le32(p + 4)) << 32; }
@@ -45,19 +56,6 @@ namespace
 			size -= (size_t)got;
 		}
 		return true;
-	}
-
-	struct Entry
-	{
-		std::string name;
-		uint16_t method = 0, flags = 0;
-		uint64_t packed = 0, size = 0, local = 0;
-	};
-
-	std::string Lower(std::string s)
-	{
-		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-		return s;
 	}
 
 	// The zip's entries, from its central directory; false when it is no zip
@@ -140,8 +138,39 @@ namespace
 	}
 }
 
+namespace chimera::zip
+{
+	bool DataAt(int fd, uint64_t fileSize, const Entry& e, uint64_t& data)
+	{
+		uint8_t lh[30];
+		if (!ReadAt(fd, e.local, lh, sizeof lh) || le32(lh) != 0x04034b50u)
+			return false;
+		data = e.local + 30 + le16(lh + 26) + le16(lh + 28);
+		return data <= fileSize && e.packed <= fileSize - data;
+	}
+
+	bool Inflate(int fd, uint64_t data, const Entry& e, std::vector<uint8_t>& out)
+	{
+		std::vector<uint8_t> packed(e.packed);
+		out.assign(e.size, 0);
+		z_stream z{};
+		if (!ReadAt(fd, data, packed.data(), packed.size()) || inflateInit2(&z, -15) != Z_OK)
+			return false;
+		z.next_in = packed.data();
+		z.avail_in = (uInt)packed.size();
+		z.next_out = out.data();
+		z.avail_out = (uInt)out.size();
+		const int r = inflate(&z, Z_FINISH);
+		const bool ok = r == Z_STREAM_END && z.total_out == e.size;
+		inflateEnd(&z);
+		return ok;
+	}
+}
+
 namespace chimera
 {
+	using namespace zip;
+
 	bool MountNusZip(const std::string& mounted, const std::string& name, const std::string& folder, std::string& tmdPath, std::string& error)
 	{
 		const int fd = open(mounted.c_str(), O_RDONLY);

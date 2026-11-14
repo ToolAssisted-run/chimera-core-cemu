@@ -38,6 +38,10 @@ namespace chimera
 		// Cemu's log types beside the ones always on (a mask of LogType
 		// bits; the hidden setting log_types, in hexadecimal), with log on
 		uint64_t logTypes = 0;
+		// the project's graphic packs: zips of Cemu's pack folders, each as
+		// the C library opens it and its name, in the slot's order; empty:
+		// none
+		std::vector<std::pair<std::string, std::string>> graphicPacks;
 	};
 
 	// the console's storage (its mlc01 folder) in the machine's filesystem

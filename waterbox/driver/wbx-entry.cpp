@@ -112,6 +112,33 @@ namespace
 		return name;
 	}
 
+	// Every name in a slot of the project's slot map, in order.
+	std::vector<std::string> SlotAll(const std::string& slots, const char* id)
+	{
+		std::vector<std::string> names;
+		const std::string k = std::string("\"") + id + "\"";
+		const auto at = slots.find(k);
+		if (at == std::string::npos)
+			return names;
+		size_t i = slots.find('[', at + k.size());
+		if (i == std::string::npos)
+			return names;
+		for (i++; i < slots.size() && slots[i] != ']'; i++)
+		{
+			if (slots[i] != '"')
+				continue;
+			std::string name;
+			for (i++; i < slots.size() && slots[i] != '"'; i++)
+			{
+				if (slots[i] == '\\' && i + 1 < slots.size())
+					i++;
+				name += slots[i];
+			}
+			names.push_back(name);
+		}
+		return names;
+	}
+
 	// A mounted file's name as it opens: a project mounts a slot's file under
 	// the name the map gives, a file opened on its own sits at "/<name>" too.
 	std::string Mounted(const std::string& name)
@@ -181,6 +208,10 @@ extern "C"
 			options.dlc = Mounted(dlc);
 			options.dlcName = dlc;
 		}
+		// Cemu's graphic packs: any number of zips of pack folders, part of
+		// the machine (a pack can change the game's code)
+		for (const std::string& pack : SlotAll(slots, "graphicpacks"))
+			options.graphicPacks.emplace_back(Mounted(pack), pack);
 		// the console's common key, which a NUS game needs: firmware, 16 bytes
 		const std::string key = Mounted(kCommonKey);
 		if (Exists(key))

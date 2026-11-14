@@ -59,6 +59,20 @@ index e200033..d8d4b6b 100644
  		t.detach();
  	}
  
+diff --git a/src/Cafe/GraphicPack/GraphicPack2.h b/src/Cafe/GraphicPack/GraphicPack2.h
+index e332a5a..89c5d2f 100644
+--- a/src/Cafe/GraphicPack/GraphicPack2.h
++++ b/src/Cafe/GraphicPack/GraphicPack2.h
+@@ -165,6 +165,9 @@ public:
+ 	RendererOutputShader* GetOuputShader(bool render_upside_down);
+ 	RendererOutputShader* GetUpscalingShader(bool render_upside_down);
+ 	RendererOutputShader* GetDownscalingShader(bool render_upside_down);
++#if defined(CHIMERA)
++	void ChimeraForgetOutputShaders();
++#endif
+ 	LatteTextureView::MagFilter GetUpscalingMagFilter() const { return m_output_settings.upscale_filter; }
+ 	LatteTextureView::MagFilter GetDownscalingMagFilter() const { return m_output_settings.downscale_filter; }
+ 
 diff --git a/src/Cafe/HW/Espresso/PPCScheduler.cpp b/src/Cafe/HW/Espresso/PPCScheduler.cpp
 index 33bc697..43e6d22 100644
 --- a/src/Cafe/HW/Espresso/PPCScheduler.cpp
@@ -431,10 +445,10 @@ index 078915c..86dce37 100644
  				break;
  			readbackInfo->waitStartTime = HighResolutionTimer().now().getTick();
 diff --git a/src/Cafe/HW/Latte/Core/LatteThread.cpp b/src/Cafe/HW/Latte/Core/LatteThread.cpp
-index 743ab67..49cfb78 100644
+index 743ab67..8d5af16 100644
 --- a/src/Cafe/HW/Latte/Core/LatteThread.cpp
 +++ b/src/Cafe/HW/Latte/Core/LatteThread.cpp
-@@ -104,6 +104,78 @@ bool LatteHandleOSScreen_DRC()
+@@ -104,6 +104,80 @@ bool LatteHandleOSScreen_DRC()
  	return true;
  }
  
@@ -464,6 +478,8 @@ index 743ab67..49cfb78 100644
 +	LatteTC_UnloadAllTextures();
 +	LatteSHRC_UnloadAll();
 +	RendererOutputShader::ShutdownStatic();
++	for (auto& pack : GraphicPack2::GetActiveGraphicPacks())
++		pack->ChimeraForgetOutputShaders();
 +	OpenGLRenderer_chimeraForgetContext();
 +	chimera_gpu_context_forget();
 +	ImGui_ImplOpenGL3_DestroyDeviceObjects();
@@ -513,7 +529,7 @@ index 743ab67..49cfb78 100644
  void LatteThread_HandleOSScreen()
  {
  	bool swapTV = LatteHandleOSScreen_TV();
-@@ -154,6 +226,9 @@ int Latte_ThreadEntry()
+@@ -154,6 +228,9 @@ int Latte_ThreadEntry()
  	}
  
  	sLatteThreadFinishedInit = true;
@@ -523,7 +539,7 @@ index 743ab67..49cfb78 100644
  
  	// register debug handler
  	if (cemuLog_isLoggingEnabled(LogType::OpenGLLogging))
-@@ -168,7 +243,7 @@ int Latte_ThreadEntry()
+@@ -168,7 +245,7 @@ int Latte_ThreadEntry()
  		g_renderer->DrawEmptyFrame(true);
  		g_renderer->DrawEmptyFrame(false);
  		g_renderer->CancelScreenshotRequest(); // keep the screenshot request queue empty
@@ -532,7 +548,7 @@ index 743ab67..49cfb78 100644
  	}
  
  	g_renderer->DrawEmptyFrame(true);
-@@ -201,8 +276,16 @@ int Latte_ThreadEntry()
+@@ -201,8 +278,16 @@ int Latte_ThreadEntry()
  	// wait until CPU has called GX2Init()
  	while (LatteGPUState.gx2InitCalled == 0)
  	{
@@ -549,7 +565,7 @@ index 743ab67..49cfb78 100644
  		LatteThread_HandleOSScreen();
  		if (Latte_GetStopSignal())
  			LatteThread_Exit();
-@@ -212,7 +295,7 @@ int Latte_ThreadEntry()
+@@ -212,7 +297,7 @@ int Latte_ThreadEntry()
  	return 0;
  }
  
@@ -558,7 +574,7 @@ index 743ab67..49cfb78 100644
  std::mutex sLatteThreadStateMutex;
  
  // initializes GPU thread which in turn also activates graphic packs
-@@ -223,8 +306,11 @@ void Latte_Start()
+@@ -223,8 +308,11 @@ void Latte_Start()
  	cemu_assert_debug(!sLatteThreadRunning);
  	sLatteThreadRunning = true;
  	sLatteThreadFinishedInit = false;

@@ -135,6 +135,18 @@ int main(int argc, char** argv)
 		fprintf(stderr, "cannot find %s\n", o.key);
 		return 2;
 	}
+	// the graphic packs' zips
+	static char packs[HARNESS_MAX_PACKS][4096];
+	const char* packNames[HARNESS_MAX_PACKS] = {};
+	for (int i = 0; i < o.packs; i++)
+	{
+		if (!realpath(o.pack[i], packs[i]))
+		{
+			fprintf(stderr, "cannot find %s\n", o.pack[i]);
+			return 2;
+		}
+		packNames[i] = harness_base(packs[i]);
+	}
 	// the console's Mii resource files that the folder has
 	static char mii[HARNESS_MII_FILES][4096];
 	bool miiHas[HARNESS_MII_FILES] = {};
@@ -204,8 +216,14 @@ int main(int argc, char** argv)
 		fprintf(stderr, "cannot link %s\n", key);
 		return 2;
 	}
+	for (int i = 0; i < o.packs; i++)
+		if (symlink(packs[i], packNames[i]) != 0)
+		{
+			fprintf(stderr, "cannot link %s\n", packs[i]);
+			return 2;
+		}
 	char buf[4096];
-	harness_slots(base, o.savedata ? harness_base(savedata) : nullptr, o.dlc ? harness_base(dlc) : nullptr, buf, sizeof buf);
+	harness_slots(base, o.savedata ? harness_base(savedata) : nullptr, o.dlc ? harness_base(dlc) : nullptr, packNames, o.packs, buf, sizeof buf);
 	WriteFile("slots", buf);
 	harness_settings(&o, buf, sizeof buf);
 	WriteFile("settings", buf);
