@@ -21,6 +21,12 @@
 
 #ifdef CHIMERA_GUEST
 #include <emulibc.h>
+/* this core's windows in Chimera's Emulator menu: miniBox's ready-made Export
+ * Save Data, built on its exports (Chimera has no tool of its own for a core,
+ * Chimera issue 610); the sandboxed core's only, as the native reference has
+ * no Chimera to open them */
+#define WBX_WINDOWS_IMPLEMENTATION
+#include <waterbox_windows.h>
 #else
 #define ECL_EXPORT __attribute__((visibility("default")))
 #define ECL_INVISIBLE
