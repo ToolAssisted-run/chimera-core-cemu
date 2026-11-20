@@ -8,7 +8,13 @@
 #include "cemu_driver.h"
 #include "chimera_input.h"
 #include "chimera_savedata.h"
+#include "chimera_graphicpacks.h"
 #include "gl-bridge.h"
+// Every choice of every graphic pack is a setting of the project, so the
+// settings file can hold hundreds: the kit's reader takes more than its
+// default 8 KiB and 256 tokens (the file's size is checked in Init)
+#define WBX_SETTINGS_MAX_BYTES 65536
+#define WBX_SETTINGS_MAX_TOKENS 2048
 #include "waterbox_settings.h"
 
 #include <cstdint>
@@ -145,6 +151,94 @@ namespace
 		return names;
 	}
 
+	// The value of a string setting, as the settings file holds it, with the
+	// JSON escapes undone (a preset's name may hold any character). False when
+	// there is none.
+	bool SettingText(const std::string& file, const char* name, std::string& out)
+	{
+		jsmn_parser parser;
+		jsmn_init(&parser);
+		const int count = jsmn_parse(&parser, file.data(), file.size(), nullptr, 0);
+		if (count < 1)
+			return false;
+		std::vector<jsmntok_t> tokens((size_t)count);
+		jsmn_init(&parser);
+		if (jsmn_parse(&parser, file.data(), file.size(), tokens.data(), (unsigned)count) < 1 || tokens[0].type != JSMN_OBJECT)
+			return false;
+		const size_t length = strlen(name);
+		// a flat object: a key, then its value, a pair at a time
+		for (int i = 1; i + 1 < count; i += 2)
+		{
+			const jsmntok_t& key = tokens[(size_t)i];
+			const jsmntok_t& value = tokens[(size_t)i + 1];
+			if (value.type == JSMN_OBJECT || value.type == JSMN_ARRAY)
+				return false;
+			if (key.type != JSMN_STRING || (size_t)(key.end - key.start) != length || file.compare((size_t)key.start, length, name) != 0)
+				continue;
+			if (value.type != JSMN_STRING)
+				return false;
+			out.clear();
+			for (int j = value.start; j < value.end; j++)
+			{
+				char ch = file[(size_t)j];
+				if (ch != '\\' || j + 1 >= value.end)
+				{
+					out += ch;
+					continue;
+				}
+				ch = file[(size_t)++j];
+				switch (ch)
+				{
+					case 'n': out += '\n'; break;
+					case 't': out += '\t'; break;
+					case 'r': out += '\r'; break;
+					case 'b': out += '\b'; break;
+					case 'f': out += '\f'; break;
+					case 'u':
+					{
+						unsigned code = 0;
+						if (j + 4 < value.end + 0 && sscanf(file.substr((size_t)j + 1, 4).c_str(), "%4x", &code) == 1)
+							j += 4;
+						// a surrogate pair is two escapes
+						if (code >= 0xD800 && code < 0xDC00 && j + 6 < value.end && file[(size_t)j + 1] == '\\' && file[(size_t)j + 2] == 'u')
+						{
+							unsigned low = 0;
+							if (sscanf(file.substr((size_t)j + 3, 4).c_str(), "%4x", &low) == 1)
+							{
+								code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+								j += 6;
+							}
+						}
+						if (code < 0x80)
+							out += (char)code;
+						else if (code < 0x800)
+						{
+							out += (char)(0xC0 | (code >> 6));
+							out += (char)(0x80 | (code & 0x3F));
+						}
+						else if (code < 0x10000)
+						{
+							out += (char)(0xE0 | (code >> 12));
+							out += (char)(0x80 | ((code >> 6) & 0x3F));
+							out += (char)(0x80 | (code & 0x3F));
+						}
+						else
+						{
+							out += (char)(0xF0 | (code >> 18));
+							out += (char)(0x80 | ((code >> 12) & 0x3F));
+							out += (char)(0x80 | ((code >> 6) & 0x3F));
+							out += (char)(0x80 | (code & 0x3F));
+						}
+						break;
+					}
+					default: out += ch; break; // \" \\ \/
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
 	// A mounted file's name as it opens: a project mounts a slot's file under
 	// the name the map gives, a file opened on its own sits at "/<name>" too.
 	std::string Mounted(const std::string& name)
@@ -155,6 +249,15 @@ namespace
 			return "/" + name;
 		return name;
 	}
+
+	// The project's graphic packs as the slot map names them
+	void GraphicPacksOf(const std::string& slots, chimera::BootOptions& options)
+	{
+		for (const std::string& pack : SlotAll(slots, "graphicpacks"))
+			options.graphicPacks.emplace_back(Mounted(pack), pack);
+	}
+
+	std::string g_gameSettings = "[]", g_suggestion;
 }
 
 void chimera_input_polled()
@@ -176,6 +279,45 @@ extern "C"
 	ECL_EXPORT void SetGpuBridge(uint64_t addr)
 	{
 		g_bridge = chimera_gl_install(reinterpret_cast<chimera_gl_bridge_fn>(static_cast<uintptr_t>(addr)));
+	}
+
+	// Called INSTEAD of Init, on the files a run would have: the choices the
+	// project's graphic packs offer, as settings, for the New Project window
+	// (and for a project's settings grid, GetGameSettings). Nothing starts.
+	ECL_EXPORT const char* SuggestSettings(void)
+	{
+		chimera::BootOptions options;
+		GraphicPacksOf(ReadFile("slots"), options);
+		std::string settings;
+		const std::string error = chimera::DescribeGraphicPacks(options, settings);
+		if (!error.empty())
+		{
+			// the text key, with its arguments after 0x1F, as a JSON string
+			std::string note;
+			for (const char ch : error)
+			{
+				if (ch == '"' || ch == '\\')
+					note += '\\';
+				if (ch == '\x1f')
+					note += "\\u001f";
+				else
+					note += ch;
+			}
+			g_suggestion = "{\"values\":{},\"note\":\"" + note + "\"}";
+		}
+		else if (settings == "[]")
+			g_suggestion = "{\"values\":{}}";
+		else
+			g_suggestion = "{\"values\":{},\"note\":\"note.packs\",\"settings\":" + settings + "}";
+		return g_suggestion.c_str();
+	}
+
+	// The settings this project has beyond the package's: a choice for each
+	// category of presets its graphic packs have, read after Init
+	ECL_EXPORT const char* GetGameSettings(void)
+	{
+		g_gameSettings = chimera::PackSettingsJson();
+		return g_gameSettings.c_str();
 	}
 
 	ECL_EXPORT int Init(void)
@@ -216,8 +358,16 @@ extern "C"
 		}
 		// Cemu's graphic packs: any number of zips of pack folders, part of
 		// the machine (a pack can change the game's code)
-		for (const std::string& pack : SlotAll(slots, "graphicpacks"))
-			options.graphicPacks.emplace_back(Mounted(pack), pack);
+		GraphicPacksOf(slots, options);
+		// and the preset the project chose for each choice a pack offers,
+		// each a setting of the project (GetGameSettings declares them)
+		const std::string settingsFile = ReadFile("settings");
+		if (!options.graphicPacks.empty() && settingsFile.size() >= (size_t)WBX_SETTINGS_MAX_BYTES - 1)
+		{
+			g_error = "error.packs_settings_too_big";
+			return 0;
+		}
+		options.packChoice = [settingsFile](const std::string& setting, std::string& value) { return SettingText(settingsFile, setting.c_str(), value); };
 		// the console's common key, which a NUS game needs: firmware, 16 bytes
 		const std::string key = Mounted(kCommonKey);
 		if (Exists(key))

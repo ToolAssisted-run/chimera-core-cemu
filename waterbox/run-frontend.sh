@@ -523,5 +523,63 @@ PY
 	fi
 fi
 
+# ---- a pack's presets chosen by the project's settings (docs/PLAN.md,
+# "Choosing a pack's presets"): the project with choices.zip (the test pack
+# with two categories of presets) and no choice runs the defaults (Count
+# Five, Picture Plain: the alarm by 5, the game's own colours); with
+# Count=Two and Picture=Inverted among its settings it counts by 2 and turns
+# the colours over. The engine's run is the sandbox runner's with the same
+# settings; a state around every frame changes nothing; the project holds the
+# choices; and the core's answer to --suggest (what the New Project window
+# asks) declares both choices with the pack's presets.
+if [ ! -f "$work/choices.zip" ]; then
+	report "engine:packchoice" SKIP "needs engine:packs's test packs"
+else
+	gcf=120
+	movie /dev/null $gcf "$work/gc.movie"
+	base='"cpu_mode": "interpreter", "console_fonts": "standin", "mii_resource": "none"'
+	chosen='"pack.chimera-choices.Count": "Two", "pack.chimera-choices.Picture": "Inverted"'
+	for p in gcd gct; do
+		mkdir -p "$work/$p"; cp "$hb/frames.wua" "$work/choices.zip" "$work/$p/"
+	done
+	"$runner" --new-project "$work/gcd/gcd.chimeraProject" "$package" "$work/gcd/frames.wua" "$work/gc.movie" \
+		--file "graphicpacks=$work/gcd/choices.zip" --settings "{$base}" > "$work/gcd.new.log" 2>&1
+	"$runner" --new-project "$work/gct/gct.chimeraProject" "$package" "$work/gct/frames.wua" "$work/gc.movie" \
+		--file "graphicpacks=$work/gct/choices.zip" --settings "{$base, $chosen}" > "$work/gct.new.log" 2>&1
+	run_project gcd c1 --frames $gcf --dump "MEM2=$work/c1.mem2" --final-screenshot "$work/c1.tga"
+	run_project gct c2 --frames $gcf --dump "MEM2=$work/c2.mem2" --final-screenshot "$work/c2.tga"
+	run_project gct c3 --frames $gcf --rerecord --dump "MEM2=$work/c3.mem2" --final-screenshot "$work/c3.tga"
+	run_wbx wc0 "$hb/frames.wua" --frames $gcf --every $gcf --dump-ram "$work/wc0.ram" --screenshot "$gcf=$work/wc0.tga"
+	run_wbx wc1 "$hb/frames.wua" --frames $gcf --every $gcf --packs "$work/choices.zip" --dump-ram "$work/wc1.ram" --screenshot "$gcf=$work/wc1.tga"
+	run_wbx wc2 "$hb/frames.wua" --frames $gcf --every $gcf --packs "$work/choices.zip" --set pack.chimera-choices.Count=Two --set pack.chimera-choices.Picture=Inverted --dump-ram "$work/wc2.ram" --screenshot "$gcf=$work/wc2.tga"
+	mem2_of "$work/wc0.ram" "$work/wc0.mem2" 2> /dev/null
+	mem2_of "$work/wc1.ram" "$work/wc1.mem2" 2> /dev/null
+	mem2_of "$work/wc2.ram" "$work/wc2.mem2" 2> /dev/null
+	pic_c1="$(python3 "$here/tests/picture.py" "$work/c1.tga" 2> /dev/null)"
+	pic_c2="$(python3 "$here/tests/picture.py" "$work/c2.tga" 2> /dev/null)"
+	pic_c3="$(python3 "$here/tests/picture.py" "$work/c3.tga" 2> /dev/null)"
+	pic_w1="$(python3 "$here/tests/picture.py" "$work/wc1.tga" 2> /dev/null)"
+	pic_w2="$(python3 "$here/tests/picture.py" "$work/wc2.tga" 2> /dev/null)"
+	alarmsc0="$(mailbox_of "$work/wc0.mem2" | cut -d/ -f6)"
+	alarmsc1="$(mailbox_of "$work/c1.mem2" | cut -d/ -f6)"; alarmsc2="$(mailbox_of "$work/c2.mem2" | cut -d/ -f6)"
+	"$runner" --project "$work/gct/gct.chimeraProject" "$package" --suggest > "$work/gct.suggest" 2> /dev/null
+	asked="$(grep -o '"name": *"pack\.chimera-choices\.[A-Za-z]*"' "$work/gct.suggest" | sed 's/.*"\(pack[^"]*\)"/\1/' | sort | tr '\n' ' ')"
+	options="$(grep -c '"Two"' "$work/gct.suggest")/$(grep -c '"Inverted"' "$work/gct.suggest")"
+	held="$(python3 - "$work/gct/gct.chimeraProject" <<'PY' 2> /dev/null
+import json, sys, zipfile
+s = json.loads(zipfile.ZipFile(sys.argv[1]).read("project.json")).get("settings", {})
+print("yes" if s.get("pack.chimera-choices.Count") == "Two" and s.get("pack.chimera-choices.Picture") == "Inverted" else "no")
+PY
+)"
+	if [ "$(meta c1 frames)" = $gcf ] && [ "$(meta c2 frames)" = $gcf ] && [ "${alarmsc0:-0}" -gt 0 ] && [ "${alarmsc1:-0}" = $((5 * alarmsc0)) ] &&
+		[ "${alarmsc2:-0}" = $((2 * alarmsc0)) ] && [ -n "$pic_c1" ] && [ "$pic_c1" = "$pic_w1" ] && [ "$pic_c2" = "$pic_w2" ] && [ "$pic_c2" != "$pic_c1" ] && same_file "$work/c1.mem2" "$work/wc1.mem2" &&
+		same_file "$work/c2.mem2" "$work/wc2.mem2" && same_file "$work/c2.mem2" "$work/c3.mem2" && [ "$pic_c3" = "$pic_c2" ] &&
+		[ "$held" = yes ] && [ "$asked" = "pack.chimera-choices.Count pack.chimera-choices.Picture " ] && [ "$options" = "1/1" ]; then
+		report "engine:packchoice" PASS "a project with the pack's presets chosen: the alarm counted $alarmsc2 against $alarmsc1 by default and $alarmsc0 without the pack; MEM2 and the picture are the sandbox runner's; a state around every frame changes nothing; the project holds the choices; --suggest declares: $asked"
+	else
+		report "engine:packchoice" FAIL "frames $(meta c1 frames)/$(meta c2 frames) $(meta c2 status) $(meta c2 detail); alarms default [$alarmsc1] chosen [$alarmsc2] without [$alarmsc0]; pictures [$pic_c1] [$pic_w1] [$pic_c2] [$pic_w2] [$pic_c3]; MEM2 $(cmp "$work/c2.mem2" "$work/wc2.mem2" 2>&1 | head -1); rerecord $(cmp -s "$work/c2.mem2" "$work/c3.mem2" && echo same || echo differs); held $held; asked [$asked] options $options $(tail -1 "$work/gct.new.log")"
+	fi
+fi
+
 echo "$ok passed, $failed failed, $skipped skipped"
 [ "$failed" -eq 0 ]

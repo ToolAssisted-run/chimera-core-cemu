@@ -920,6 +920,48 @@ else
 	fi
 fi
 
+# packs:choose: a pack's presets are chosen by the project's settings, one
+# for each category of presets (docs/PLAN.md, "Choosing a pack's presets").
+# With choices.zip (a pack with two categories): with no choice the alarm
+# counts by 5 (the preset marked default) and the picture is the game's own;
+# with Count=Two and Picture=Inverted it counts by 2 and the picture's colours
+# turn over; naming the defaults is the run with no choice; a preset the pack
+# lacks is refused with its key. In the sandbox the choices give the native
+# run's lines, with a state before every frame and in a new GPU context.
+if [ "$have_packs" = 0 ]; then
+	report "packs:choose" SKIP "needs packs:applied's runs"
+else
+	native gc0 "$frames_wua" --frames "$pf" --every 60 --packs "$work/choices.zip" --screenshot "$pf=$work/gc0.tga" --log
+	native gc1 "$frames_wua" --frames "$pf" --every 60 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Two --set pack.chimera-choices.Picture=Inverted --screenshot "$pf=$work/gc1.tga" --log
+	native gc2 "$frames_wua" --frames "$pf" --every 60 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Five --set pack.chimera-choices.Picture=Plain
+	native gc3 "$frames_wua" --frames 1 --every 1 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Seven
+	alarmsc0="$(mailbox "$work/gc0.out" "$pf" 6)"; alarmsc1="$(mailbox "$work/gc1.out" "$pf" 6)"
+	pxc0="$(python3 "$here/tests/pixel.py" "$work/gc0.tga" 640,400 2> /dev/null)"
+	pxc1="$(python3 "$here/tests/pixel.py" "$work/gc1.tga" 640,400 2> /dev/null)"
+	turnedc="$(printf '%06x' $((0xFFFFFF - 0x${pxc0:-0})))"
+	refusedc="$(grep -a -c "Init failed: error.packs_preset.pack.chimera-choices.Count.Seven" "$work/gc3.err")"
+	activatedc="$(grep -a -c 'Activate graphic pack: Chimera/Tests/Choices \[Presets: Five,Plain\]' "$work/gc0.err")/$(grep -a -c 'Activate graphic pack: Chimera/Tests/Choices \[Presets: Two,Inverted\]' "$work/gc1.err")"
+	if whole "$work/gc0.out" "$pf" && whole "$work/gc1.out" "$pf" && [ "${alarms0:-0}" -gt 0 ] && [ "${alarmsc0:-0}" = $((5 * alarms0)) ] &&
+		[ "${alarmsc1:-0}" = $((2 * alarms0)) ] && [ "$pxc0" = "$px0" ] && [ -n "$pxc1" ] && [ "$pxc1" = "$turnedc" ] && [ "$pxc1" != "$pxc0" ] &&
+		cmp -s "$work/gc0.out" "$work/gc2.out" && [ "$refusedc" = 1 ] && [ "$activatedc" = "1/1" ]; then
+		if [ "$have_sandbox" = 1 ]; then
+			sandbox wgc "$frames_wua" --frames "$pf" --every 60 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Two --set pack.chimera-choices.Picture=Inverted
+			sandbox wgcr "$frames_wua" --frames 120 --every 60 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Two --set pack.chimera-choices.Picture=Inverted --rerecord
+			native gcc "$frames_wua" --frames "$pf" --every 60 --packs "$work/choices.zip" --set pack.chimera-choices.Count=Two --set pack.chimera-choices.Picture=Inverted --new-context 1
+			if cmp -s "$work/gc1.out" "$work/wgc.out" && cmp -s "$work/gc1.out" "$work/gcc.out" &&
+				[ "$(sed -n 2p "$work/wgcr.out")" = "$(sed -n 2p "$work/gc1.out")" ] && whole "$work/wgcr.out" 120; then
+				report "packs:choose" PASS "the alarm counted $alarmsc0 by default (Five, x5 of $alarms0) and $alarmsc1 with Two (x2); Inverted turned the picture over ($pxc0 -> $pxc1); the defaults named are the run with none; an unknown preset is refused; the sandbox is the native run, with a state before every frame and a new GPU context"
+			else
+				report "packs:choose" FAIL "sandbox: native [$(last "$work/gc1.out")] sandbox [$(last "$work/wgc.out")] new contexts [$(last "$work/gcc.out")] rerecord [$(last "$work/wgcr.out")] $(tail -1 "$work/wgcr.err")"
+			fi
+		else
+			report "packs:choose" PASS "the alarm counted $alarmsc0 by default (Five, x5 of $alarms0) and $alarmsc1 with Two (x2); Inverted turned the picture over ($pxc0 -> $pxc1); the defaults named are the run with none; an unknown preset is refused (the sandbox was not run: $why_sandbox)"
+		fi
+	else
+		report "packs:choose" FAIL "alarms default [$alarmsc0] Two [$alarmsc1] without packs [$alarms0]; pixel [$pxc0] [$pxc1] want [$px0] [$turnedc]; defaults named the same: $(cmp -s "$work/gc0.out" "$work/gc2.out" && echo yes || echo no); refused [$refusedc]; activated [$activatedc] $(tail -1 "$work/gc1.err")"
+	fi
+fi
+
 # The texts. Names are never translated or bent (Chimera's owner,
 # 2026-10-31): Cemu, Wii U, GamePad and the rest stay as written in all 26
 # language tables (waterbox/tests/check-names.py).

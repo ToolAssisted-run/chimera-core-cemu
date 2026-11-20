@@ -2,6 +2,7 @@
 // the same code natively and in the sandbox.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,7 +43,17 @@ namespace chimera
 		// the C library opens it and its name, in the slot's order; empty:
 		// none
 		std::vector<std::pair<std::string, std::string>> graphicPacks;
+		// the preset the project chose for a choice a pack offers (the
+		// setting's name, then its value in the second argument): true, or
+		// false when it chose none, which leaves the pack's own default
+		std::function<bool(const std::string&, std::string&)> packChoice;
 	};
+
+	// What SuggestSettings answers: the packs of options.graphicPacks read as
+	// Boot reads them, without starting a console, and the settings they
+	// offer (a JSON array, empty of items when none) in settings. An empty
+	// string, or why not.
+	std::string DescribeGraphicPacks(const BootOptions& options, std::string& settings);
 
 	// the console's storage (its mlc01 folder) in the machine's filesystem
 	std::string StoragePath();

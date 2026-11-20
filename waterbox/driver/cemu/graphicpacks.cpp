@@ -20,6 +20,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -132,19 +135,148 @@ namespace chimera
 		return true;
 	}
 
-	int LoadGraphicPacks()
+	namespace
 	{
+		std::vector<PackChoice> s_choices;
+
+		// letters, digits and . - _ only; every other run of characters
+		// becomes one underscore
+		std::string Plain(const std::string& text)
+		{
+			std::string out;
+			for (unsigned char ch : text)
+			{
+				if (isalnum(ch) || ch == '.' || ch == '-' || ch == '_')
+					out += (char)ch;
+				else if (out.empty() || out.back() != '_')
+					out += '_';
+			}
+			return out;
+		}
+	}
+
+	const std::vector<PackChoice>& GraphicPackChoices()
+	{
+		return s_choices;
+	}
+
+	namespace
+	{
+		std::string Json(const std::string& s)
+		{
+			std::string out = "\"";
+			for (char ch : s)
+			{
+				if (ch == '"' || ch == '\\')
+				{
+					out += '\\';
+					out += ch;
+				}
+				else if ((unsigned char)ch < 0x20)
+				{
+					char b[8];
+					snprintf(b, sizeof b, "\\u%04x", ch);
+					out += b;
+				}
+				else
+					out += ch;
+			}
+			return out + "\"";
+		}
+	}
+
+	std::string PackSettingsJson()
+	{
+		std::string out = "[";
+		for (const PackChoice& c : s_choices)
+		{
+			out += out.size() > 1 ? "," : "";
+			out += "{\"name\":" + Json(c.setting) + ",\"display\":" + Json(c.display) + ",\"type\":\"enum\",\"options\":[";
+			for (size_t i = 0; i < c.presets.size(); i++)
+				out += (i ? "," : "") + Json(c.presets[i]);
+			out += "],\"default\":" + Json(c.defaultPreset);
+			out += ",\"description\":" + Json("game_setting.pack" TEXT_ARG + c.folder) + "}";
+		}
+		return out + "]";
+	}
+
+	bool LoadGraphicPacks(const std::function<bool(const std::string&, std::string&)>& chosen, int& count, std::string& error)
+	{
+		s_choices.clear();
 		// upstream's own search of its graphicPacks folder: every folder with
 		// a rules.txt, in name order (the machine's filesystem lists so), is
 		// a pack; one that is outdated or damaged is left out, as upstream
 		// leaves it out (its log says why)
 		GraphicPack2::LoadAll();
-		// Upstream turns on the packs its settings name (settings.xml), with
-		// the presets chosen there; a project's packs are all on, and no
-		// preset is chosen, so each pack keeps the ones its rules.txt makes
-		// the default.
+		count = (int)GraphicPack2::GetGraphicPacks().size();
+		for (const auto& pack : GraphicPack2::GetGraphicPacks())
+		{
+			// the pack's folder as the zip has it: upstream's path, without
+			// graphicPacks/ and the zip's place in the slot (000/), so that
+			// a choice keeps its name when the slot's order changes
+			std::string folder = pack->GetNormalizedPathString();
+			if (folder.compare(0, 13, "graphicPacks/") == 0)
+				folder.erase(0, 13);
+			const size_t slash = folder.find('/');
+			if (slash != std::string::npos)
+				folder.erase(0, slash + 1);
+			if (folder.size() > 10 && folder.compare(folder.size() - 10, 10, "/rules.txt") == 0)
+				folder.erase(folder.size() - 10);
+			std::vector<std::string> order;
+			const auto categories = pack->GetCategorizedPresets(order);
+			bool changed = false;
+			for (const std::string& category : order)
+			{
+				const auto& presets = categories.at(category);
+				if (presets.size() < 2)
+					continue;
+				PackChoice choice;
+				choice.folder = folder;
+				choice.category = category;
+				for (const auto& preset : presets)
+					if (std::find(choice.presets.begin(), choice.presets.end(), preset->name) == choice.presets.end())
+						choice.presets.push_back(preset->name);
+				if (choice.presets.size() < 2)
+					continue;
+				// what upstream chose when nothing was said: the preset marked
+				// default = 1, else the first (the constructor and
+				// ValidatePresetSelections made it active)
+				choice.defaultPreset = pack->GetActivePreset(category);
+				if (choice.defaultPreset.empty())
+					choice.defaultPreset = choice.presets[0];
+				std::string name = "pack." + Plain(folder) + (category.empty() ? "" : "." + Plain(category));
+				for (int n = 2; std::any_of(s_choices.begin(), s_choices.end(), [&](const PackChoice& o) { return o.setting == name; }); n++)
+					name = "pack." + Plain(folder) + "." + Plain(category) + "." + std::to_string(n);
+				choice.setting = name;
+				const std::string& label = pack->GetVirtualPath().empty() ? folder : pack->GetVirtualPath();
+				choice.display = category.empty() ? label : label + " - " + category;
+				std::string value;
+				if (chosen(choice.setting, value) && value != choice.defaultPreset)
+				{
+					if (std::find(choice.presets.begin(), choice.presets.end(), value) == choice.presets.end())
+					{
+						error = "error.packs_preset" TEXT_ARG + choice.setting + TEXT_ARG + value;
+						return false;
+					}
+					pack->SetActivePreset(category, value, false);
+					changed = true;
+				}
+				s_choices.push_back(std::move(choice));
+			}
+			if (changed)
+			{
+				// a preset chosen can hide or show the presets of another
+				// category (a pack of version 5 and later), as in Cemu's
+				// window
+				pack->UpdatePresetVisibility();
+				pack->ValidatePresetSelections();
+			}
+		}
+		// Upstream turns on the packs its settings name (settings.xml); a
+		// project's packs are all on, with the presets the project chose or,
+		// for a choice it did not make, the ones rules.txt makes the default.
 		for (const auto& pack : GraphicPack2::GetGraphicPacks())
 			pack->SetEnabled(true);
-		return (int)GraphicPack2::GetGraphicPacks().size();
+		return true;
 	}
 }

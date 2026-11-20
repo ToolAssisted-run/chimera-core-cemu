@@ -53,6 +53,10 @@ renderer setting the window looks for; see below).
   packs, applied at power-on and part of the machine, so a movie replays
   with them. The user brings the packs; nothing is downloaded. No change
   to Chimera itself." Below, "Graphic packs".
+- (user-decided, 2026-11-20) Graphic pack presets (chimera issue 626):
+  offer each pack's presets so that the person can choose, with each
+  pack's own default preset chosen when nothing is. Below, "Choosing a
+  pack's presets".
 - (user-decided, 2026-11-03) A Wii U game for local tests comes from the
   owner. Until then the tests are this repository's own programs. A game is
   copied (never linked) to ~/core-content/cemu with a line in
@@ -1368,15 +1372,14 @@ names the title (or names every title, `titleIds = *`): the patches are
 applied to the game's code before it runs, the `[RAM]` mappings are made,
 the shaders and texture rules take effect.
 
-**The preset rule.** No preset is ever chosen by the project, so each pack
-runs with what upstream gives a pack the user has never set: in each
-category of presets, the preset marked `default = 1`, or else the first
-one in `rules.txt`; for packs of version 5 and later, if that preset is
-hidden by its `condition`, the first visible one of the category (or the
-visible one marked default). This is upstream's `GraphicPack2` constructor
-and `ValidatePresetSelections` with an empty settings entry. A setting per
-pack for its preset is not offered: it would need a setting whose values
-come from the project's files, which Chimera's settings do not have.
+**The preset rule.** A project that chooses nothing runs each pack with what
+upstream gives a pack the user has never set: in each category of presets,
+the preset marked `default = 1`, or else the first one in `rules.txt`; for
+packs of version 5 and later, if that preset is hidden by its `condition`,
+the first visible one of the category (or the visible one marked default).
+This is upstream's `GraphicPack2` constructor and `ValidatePresetSelections`
+with an empty settings entry. The project can choose other presets: see
+"Choosing a pack's presets", below.
 
 **Part of the machine.** A patch changes the game's code, so a pack is as
 much the machine as the game is: the packs are given before power-on and
@@ -1468,3 +1471,129 @@ title (00050000-10145C00) that would count by 100.
 
 Not tried: a community pack, a commercial game with a pack, a real
 graphics card, Windows.
+
+## Choosing a pack's presets (2026-11-20)
+
+Chimera issue 626: a pack whose `rules.txt` has `[Preset]` sections (a
+resolution, a bloom strength, a frame rate) could not be used here, because
+nothing let the person choose, as Cemu's own window does. Decision
+(user-decided, 2026-11-20): offer each pack's presets so that the person
+can choose; the default is each pack's own, as in Cemu.
+
+**How it is offered, with no change to Chimera.** The core declares the
+choices as the project's own settings, with the two exports Chimera already
+has for a game's own settings (Chimera's docs/porting-a-core.md,
+`SuggestSettings` and `GetGameSettings`; the FBNeo core's dip switches are
+the model):
+
+- One setting for each category of presets of each pack that has two or
+  more presets in it (a category with one preset has nothing to choose). A
+  pack with presets of no category has one, named after the pack alone.
+  Its type is `enum`, its options are the preset names in `rules.txt`'s
+  order, its default is the preset upstream makes active when nothing is
+  said (above), and its label is the pack's `path` (the name Cemu's window
+  shows), then " - " and the category.
+- Its name is `pack.<folder>.<category>`: the pack's folder in the zip,
+  without the zip's place in the slot, and the category, each with every
+  run of characters other than letters, digits, `.`, `-` and `_` made one
+  `_` (a second pack that comes to the same name gets `.2`). The name does
+  not depend on the order of the zips in the slot, so a project keeps its
+  choices when the zips are put in another order.
+- `GetGameSettings` answers with them after `Init` (so a project's settings
+  grid shows them, with the values the project holds), and `SuggestSettings`
+  answers with the same declarations before any machine runs (so the New
+  Project window can show them). The latter mounts the slot's zips and reads
+  the packs with upstream's own loader, as `Init` does, and starts nothing.
+- `Init` reads each setting. A preset that is the default, or no value, leaves
+  upstream's choice; any other is made active with upstream's
+  `SetActivePreset`, then the visibility of the presets is worked out again
+  and `ValidatePresetSelections` runs, as Cemu's window does after a choice
+  (so choosing a preset that hides another category's selection moves that
+  selection to its default). A preset the pack does not have is refused
+  with `error.packs_preset`.
+- The settings file the kit reads is 8 KiB and 256 tokens by default, which
+  a few packs' choices would pass; the core reads up to 64 KiB and 2048
+  tokens (about 800 choices) and refuses a project whose file reaches the
+  limit (`error.packs_settings_too_big`) instead of reading it cut short.
+
+**Does a preset change the machine? Yes.** A preset's variables are used in
+the pack's patches (`patch_*.asm`: `$step` in the test pack becomes the
+value in the game's code before it runs), in its `[TextureRedefine]` rules,
+and in its shaders, so a different preset is a different machine: another
+count of instructions, another picture, another memory. That is why the
+choice is a setting of the project, recorded in it and cited by a movie: a
+movie replays only with the same choices, as with the same packs (the slot)
+and the same CPU mode. A state taken with one choice cannot be loaded into a
+machine started with another, as for any other setting. The choice cannot
+change while the console runs; a changed setting starts the machine again.
+No state of a project is lost by this change: a project made before it has
+no pack settings, so every pack runs with its default, as it did.
+
+**What it does not do.**
+
+- Presets are listed whole. Cemu's window hides the presets whose
+  `condition` is false for the other choices made; here every preset of a
+  category is offered, and a choice that the other choices hide is moved to
+  the category's default by `ValidatePresetSelections` when the machine
+  starts (the setting still says the hidden name).
+- A pack for another game is offered too: the settings come from the whole
+  slot, not only from the packs that name the game (the core does not know
+  the game's title when it is asked, with a game given as a `.wua`). A
+  zip of the community's whole collection gives many settings; zip the packs
+  for the game.
+- The choices are not translated: they are the pack's own words.
+
+**Measured** (2026-11-20, jaffanator01, in the chimera-dev container, on
+Mesa's llvmpipe: software GL, not a real card). The test pack is this
+repository's own (`waterbox/tests/make-packs.py`, `choices.zip`): for the
+frames title, categories "Count" (Two: `$step` 2; Five: 5, marked default)
+and "Picture" (Plain; Inverted, which turns the output shader's colours
+over).
+
+- packs:choose (run-gate.sh, natively and in the sandbox): 300 frames of
+  frames.wua with choices.zip. With no choice the alarm counted 500 (Five,
+  x5 of the 100 without a pack) and the picture is the game's own; with
+  Count=Two and Picture=Inverted it counted 200 (x2) and the picture's
+  colours turned over (a20e7a -> 5df185). Naming the defaults (Five, Plain)
+  is the run with no choice, line for line. A preset the pack lacks
+  (Count=Seven) is refused with error.packs_preset. The sandbox gives the
+  native run's lines, with a state saved and loaded before each of 120
+  frames and with a new GPU context before every frame. Cemu's log: "Activate
+  graphic pack: Chimera/Tests/Choices [Presets: Five,Plain]" and
+  "[Presets: Two,Inverted]".
+- engine:packchoice (run-frontend.sh, Chimera's chimera-run): a project of
+  frames.wua with choices.zip in its slot and the two choices among its
+  settings: at frame 120 the alarm counted 80 against 200 by default and 40
+  without the pack (x2, x5); MEM2 and the picture are the sandbox runner's
+  with the same settings; a state around every frame ends the same; the
+  project's settings hold both choices; and `chimera-run --project ...
+  --suggest` (the New Project window's question) declares
+  pack.chimera-choices.Count and pack.chimera-choices.Picture, each with its
+  presets.
+- Whole scripts: run-gate.sh 32 passed, 3 skipped (firmware:fonts,
+  firmware:mii, nus:game: no such files given), and 1 failed: packs:choose,
+  whose first version looked for "Presets: Five, Plain" where Cemu writes
+  "Five,Plain" (a mistake of the test's own); with that fixed it passed
+  when run alone with packs:applied and packs:sandbox (3 passed). The
+  whole run-frontend.sh: 10 passed, 3 skipped (engine:fonts, engine:mii,
+  engine:nus), and 1 failed: engine:packchoice, whose first version compared the
+  default project's picture with a run with no pack at all (the pack's
+  output shader makes the picture another one even when it changes no
+  colour) and read the --suggest answer wrongly; fixed, it passed when run
+  alone on the same build. Chimera's tests/test-packages on the package: 0
+  failed; tools/check-core-texts.py: 118 keys; check-names.py: 0 problems.
+- Seen to fail, on purpose, once each: the chosen preset not made active
+  (SetActivePreset left out): packs:choose said alarms default [500] Two
+  [500], picture not turned over; engine:packchoice said chosen [200], the
+  default's.
+
+Not tried: a game with a community pack (no game here fits: the one Wii U
+game on the machine, New Super Mario Bros. U, is in the NUS form and needs
+the Wii U common key, which is not on the machine; the community packs of
+the issue's zip for it, which have categories, were only read), a real
+graphics card, Windows. A pack's choices in the New Project window were
+shown only through `--suggest`: that window asks again only when the game
+file changes, so packs added after the game do not show their choices there
+until the project is opened and its settings grid is used (Chimera
+docs/new-core.md has no rule for this; see the pull request).
+

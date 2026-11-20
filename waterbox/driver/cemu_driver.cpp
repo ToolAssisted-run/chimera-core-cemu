@@ -505,6 +505,32 @@ namespace chimera
 		memfs::put(lang + "/country.txt", std::vector<uint8_t>(text.begin(), text.end()));
 	}
 
+	std::string DescribeGraphicPacks(const BootOptions& options, std::string& settings)
+	{
+		settings = "[]";
+		if (options.graphicPacks.empty())
+			return {};
+		memfs::set_clock(CalendarSeconds);
+		const std::string user = std::string(memfs::ROOT) + "/user";
+		for (size_t i = 0; i < options.graphicPacks.size(); i++)
+		{
+			char folder[16];
+			snprintf(folder, sizeof folder, "/%03zu", i);
+			std::string packError;
+			if (!MountGraphicPacks(options.graphicPacks[i].first, options.graphicPacks[i].second, user + "/graphicPacks" + folder, packError))
+				return packError;
+		}
+		std::set<fs::path> failedWriteAccess;
+		const fs::path userPath = _utf8ToPath(user);
+		ActiveSettings::SetPaths(true, userPath / "cemu", userPath, userPath, userPath / "cache", userPath, failedWriteAccess);
+		int packs = 0;
+		std::string packError;
+		if (!LoadGraphicPacks([](const std::string&, std::string&) { return false; }, packs, packError))
+			return packError;
+		settings = PackSettingsJson();
+		return {};
+	}
+
 	std::string Boot(const BootOptions& options)
 	{
 		s_cpuMode = options.recompiler ? CPUMode::SinglecoreRecompiler : CPUMode::SinglecoreInterpreter;
@@ -608,7 +634,12 @@ namespace chimera
 		// memory map reads the packs' [RAM] sections); Cemu activates those
 		// of the title when it starts it (CafeSystem's ActivateForCurrentTitle)
 		if (!options.graphicPacks.empty())
-			LoadGraphicPacks();
+		{
+			int packs = 0;
+			std::string packError;
+			if (!LoadGraphicPacks(options.packChoice ? options.packChoice : [](const std::string&, std::string&) { return false; }, packs, packError))
+				return packError;
+		}
 		WindowSystem::Create();
 		AES128_init();
 		PPCTimer_init();

@@ -21,6 +21,13 @@
 #     patch is stored, so both ways of reading a zip's entry are used;
 #   chimera-other, for another title (00050000-10145C00): the same patch
 #     with a step of 100, which the frames title must not get.
+# out/choices.zip holds chimera-choices, for the frames title, a pack whose
+#   presets are in two categories (the Graphic Packs choices of the project,
+#   docs/PLAN.md "Choosing a pack's presets"): "Count" (Two: $step 2; Five:
+#   $step 5, marked default = 1) and "Picture" (Plain: $invert 0, the first;
+#   Inverted: $invert 1), with the same patch and an output shader that
+#   turns the colours over when $invert is 1. Without a choice: the alarm
+#   counts by 5 and the picture is the game's own.
 # out/other.zip holds chimera-other alone; out/norules.zip a folder with no
 # rules.txt; out/notzip.zip is not a zip.
 import re
@@ -80,6 +87,42 @@ default = 1
 """
 
 
+CHOICES_PRESETS = """
+[Default]
+$step:int = 1
+$invert:int = 0
+
+[Preset]
+name = Two
+category = Count
+$step:int = 2
+
+[Preset]
+name = Five
+category = Count
+default = 1
+$step:int = 5
+
+[Preset]
+name = Plain
+category = Picture
+$invert:int = 0
+
+[Preset]
+name = Inverted
+category = Picture
+$invert:int = 1
+"""
+
+CHOICES_SHADER = """
+void outputShader()
+{
+	vec3 c = texture(textureSrc, passUV).rgb;
+	colorOut0 = vec4($invert == 1 ? vec3(1.0) - c : c, 1.0);
+}
+"""
+
+
 def main():
     if len(sys.argv) != 4:
         sys.exit("usage: make-packs.py <frames.elf> <objdump> <out folder>")
@@ -97,6 +140,10 @@ def main():
         z.writestr("chimera-alarm/patch_alarm.asm", patch(addr, reg, "$step"), S)
         z.writestr("chimera-alarm/output.glsl", INVERT, D)
         other(z)
+    with zipfile.ZipFile(out + "/choices.zip", "w") as z:
+        z.writestr("chimera-choices/rules.txt", rules(FRAMES_TITLE, "Choices", CHOICES_PRESETS), D)
+        z.writestr("chimera-choices/patch_alarm.asm", patch(addr, reg, "$step"), S)
+        z.writestr("chimera-choices/output.glsl", CHOICES_SHADER, D)
     with zipfile.ZipFile(out + "/other.zip", "w") as z:
         other(z)
     with zipfile.ZipFile(out + "/norules.zip", "w") as z:
